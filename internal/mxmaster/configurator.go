@@ -309,10 +309,17 @@ func (c *Configurator) applySmartShift(ctx context.Context) error {
 			c.addSmartShiftCleanup(status)
 		}
 		if err := c.features.SmartShift.SetTorque(ctx, byte(*setting.Torque)); err != nil {
-			return fmt.Errorf("mxmaster: set smart shift torque: %w", err)
+			if !isUnsupportedSmartShiftTorque(err) {
+				return fmt.Errorf("mxmaster: set smart shift torque: %w", err)
+			}
 		}
 	}
 	return nil
+}
+
+func isUnsupportedSmartShiftTorque(err error) bool {
+	var unsupported *hidpp.UnsupportedError
+	return errors.As(err, &unsupported) && unsupported.Operation == "smart shift torque"
 }
 
 func (c *Configurator) addSmartShiftCleanup(status SmartShiftStatus) {

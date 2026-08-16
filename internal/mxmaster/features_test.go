@@ -20,6 +20,7 @@ type fakeCall struct {
 type fakeFeatureDevice struct {
 	features  map[uint16]hidpp.FeatureInfo
 	responses map[byte][][]byte
+	callErrs  map[byte][]error
 	calls     []fakeCall
 }
 
@@ -32,6 +33,13 @@ func (f *fakeFeatureDevice) LookupFeature(_ context.Context, id uint16) (hidpp.F
 
 func (f *fakeFeatureDevice) Call(_ context.Context, index, function byte, params []byte) ([]byte, error) {
 	f.calls = append(f.calls, fakeCall{index: index, fn: function, params: append([]byte(nil), params...)})
+	if queue := f.callErrs[function]; len(queue) > 0 {
+		err := queue[0]
+		f.callErrs[function] = queue[1:]
+		if err != nil {
+			return nil, err
+		}
+	}
 	queue := f.responses[function]
 	if len(queue) == 0 {
 		return nil, errors.New("test fake: no response")
@@ -42,7 +50,94 @@ func (f *fakeFeatureDevice) Call(_ context.Context, index, function byte, params
 }
 
 func featureDevice(id uint16, index byte) *fakeFeatureDevice {
-	return &fakeFeatureDevice{features: map[uint16]hidpp.FeatureInfo{id: {ID: id, Index: index}}, responses: make(map[byte][][]byte)}
+	return &fakeFeatureDevice{
+		features:  map[uint16]hidpp.FeatureInfo{id: {ID: id, Index: index}},
+		responses: make(map[byte][][]byte),
+		callErrs:  make(map[byte][]error),
+	}
+}
+
+func TestApplySmartShiftIgnoresUnsupportedTorque(t *testing.T) {
+	fake := featureDevice(FeatureSmartShiftV2, 4)
+	fake.responses[0x10] = [][]byte{{1, 20, 70}, {1, 20, 70}, {1, 20, 70}}
+	fake.responses[0x00] = [][]byte{{0}, {0}, {0}}
+	fake.responses[0x20] = [][]byte{{}}
+	client, err := NewSmartShift(context.Background(), fake)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled, threshold, torque := true, 100, 70
+	configurator := &Configurator{
+		settings: config.Config{SmartShift: &config.SmartShiftConfig{
+			Enabled:   &enabled,
+			Threshold: &threshold,
+			Torque:    &torque,
+		}},
+		features: &FeatureSet{SmartShift: client},
+	}
+
+	if err := configurator.applySmartShift(context.Background()); err != nil {
+		t.Fatalf("applySmartShift() error = %v", err)
+	}
+
+	var statusSets []fakeCall
+	for _, call := range fake.calls {
+		if call.fn == 0x20 {
+			statusSets = append(statusSets, call)
+		}
+	}
+	if len(statusSets) != 1 {
+		t.Fatalf("SmartShift set calls = %d, want 1", len(statusSets))
+	}
+	if got := statusSets[0].params; !reflect.DeepEqual(got, []byte{0, 100}) {
+		t.Fatalf("SmartShift status set params = %v, want [0 100]", got)
+	}
+}
+
+func TestApplySmartShiftPropagatesTorqueFailures(t *testing.T) {
+	tests := []struct {
+		name    string
+		failure error
+		target  error
+	}{
+		{
+			name:    "transport",
+			failure: &hidpp.ClosedTransportError{Cause: errors.New("link reset")},
+			target:  hidpp.ErrClosedTransport,
+		},
+		{
+			name:    "protocol",
+			failure: &hidpp.ProtocolError{Code: 0x05},
+			target:  hidpp.ErrProtocol,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fake := featureDevice(FeatureSmartShiftV2, 4)
+			fake.responses[0x10] = [][]byte{{1, 20, 70}, {1, 20, 70}}
+			fake.responses[0x00] = [][]byte{{0}, {0}}
+			fake.responses[0x20] = [][]byte{{}}
+			fake.callErrs[0x10] = []error{nil, nil, test.failure}
+			client, err := NewSmartShift(context.Background(), fake)
+			if err != nil {
+				t.Fatal(err)
+			}
+			enabled, threshold, torque := true, 100, 70
+			configurator := &Configurator{
+				settings: config.Config{SmartShift: &config.SmartShiftConfig{
+					Enabled:   &enabled,
+					Threshold: &threshold,
+					Torque:    &torque,
+				}},
+				features: &FeatureSet{SmartShift: client},
+			}
+
+			err = configurator.applySmartShift(context.Background())
+			if err == nil || !errors.Is(err, test.target) {
+				t.Fatalf("applySmartShift() error = %v, want %v", err, test.target)
+			}
+		})
+	}
 }
 
 func TestSmartShiftVersionFallbackAndWireFormats(t *testing.T) {
