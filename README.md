@@ -1,83 +1,195 @@
 # logitechd
 
-`logitechd` is a Linux daemon for already-paired Logitech Bolt and Unifying
-receivers. It discovers the receiver HIDRAW node, keeps one shared receiver
-session open, applies the configured MX Master features, and sends configured
-button/gesture output through Linux uinput.
+`logitechd` is a clean-room Go daemon for configuring Logitech mice on Linux.
+It communicates with already-paired Logitech Bolt and Unifying receivers over
+HID++, configures device features, and exposes remapped controls through Linux
+`uinput`.
 
-The current setup is covered by the example: a Bolt receiver with USB ID
-`046d:c548`, an automatically discovered `/dev/hidraw*` path, and an MX Master
-3S in wireless slot/index `2`. Set `receiver.type: unifying` for a Unifying
-receiver. A fixed node can be selected with `receiver.path` or the
-`-receiver-path` command-line override.
+The current device implementation targets the **Logitech MX Master 3S**. The
+receiver and HID++ transport layers are reusable for future Logitech devices.
 
-## Configuration and permissions
+## Supported hardware
 
-Configuration is strict YAML. Unknown fields and multiple YAML documents are
-rejected. Start with [`example.yaml`](example.yaml):
+| Component | Status |
+| --- | --- |
+| Logitech Bolt receiver | Supported |
+| Logitech Unifying receiver | Supported |
+| MX Master 3S | Supported |
+| Other Logitech mice | Not yet guaranteed |
+
+The receiver must already be paired with the mouse. Pairing and unpairing are
+not currently implemented.
+
+## Features
+
+* Automatic Bolt/Unifying receiver discovery
+* Receiver and wireless-device reconnect handling
+* MX Master 3S SmartShift configuration
+* Hi-res scrolling and thumb-wheel configuration
+* DPI configuration
+* Button remapping, key actions, scrolling, axes, and gestures
+* Strict YAML configuration
+* Optional systemd service
+
+## Requirements
+
+* Linux with HIDRAW and `uinput` support
+* Go 1.23 or newer to build from source
+* A paired Logitech Bolt or Unifying receiver
+* Read/write access to the receiver's `/dev/hidraw*` node
+* Read/write access to `/dev/uinput`
+
+The daemon needs elevated device permissions, but it does not require a GUI or
+D-Bus session.
+
+## Quick start
+
+Clone and build the daemon:
 
 ```sh
-./logitechd -config ./example.yaml -validate
+git clone https://github.com/atremb/logitechd.git
+cd logitechd
+go build -o logitechd ./cmd/logitechd
 ```
 
-Validation does not open HIDRAW or uinput. The daemon waits for a receiver or
-paired child that is temporarily absent, and reconnects after receiver loss or
-device sleep/wake. It does not log action values or other configuration
-secrets.
+Copy and edit the example configuration:
 
-The runtime user needs read/write access to the selected `/dev/hidraw*` node and
-`/dev/uinput`. The supplied systemd unit runs as the dedicated `logitechd`
-user/group with `input` as a supplementary group; it does not create that
-account or grant device access by itself. Provision the account and verify the
-host's udev ownership before enabling the unit:
+```sh
+cp example.yaml config.yaml
+$EDITOR config.yaml
+```
+
+The example targets an MX Master 3S named `MX Master 3S` in receiver slot `2`.
+For a Unifying receiver, change:
+
+```yaml
+receiver:
+  type: unifying
+```
+
+Validate the configuration without opening hardware:
+
+```sh
+./logitechd -config ./config.yaml -validate
+```
+
+Run manually as root for an initial hardware test:
+
+```sh
+sudo ./logitechd -config ./config.yaml
+```
+
+## YAML configuration
+
+Configuration is strict YAML. Unknown fields, invalid values, and multiple YAML
+documents are rejected. A minimal configuration is:
+
+```yaml
+receiver:
+  type: bolt
+
+device:
+  name: MX Master 3S
+  index: 2
+
+smart_shift:
+  enabled: false
+  threshold: 100
+  torque: 100
+```
+
+The receiver path is discovered automatically. On systems with multiple
+receivers, set it explicitly:
+
+```yaml
+receiver:
+  type: bolt
+  path: /dev/hidraw2
+```
+
+See [`example.yaml`](example.yaml) for button, wheel, DPI, and gesture examples.
+
+## Device permissions
+
+The supplied service runs as the `logitechd` user with the `input` group. Create
+the service account before installing the unit:
 
 ```sh
 sudo useradd --system --user-group --no-create-home --shell /usr/sbin/nologin logitechd
 sudo usermod --append --groups input logitechd
 ```
 
-## Build, test, run, and install
-
-Go 1.23 or newer is required.
+Check the device permissions on your system:
 
 ```sh
-go build ./...
+ls -l /dev/hidraw* /dev/uinput
+```
+
+If your distribution does not already grant the `input` group access, create a
+udev rule such as `/etc/udev/rules.d/70-logitechd.rules`:
+
+```udev
+KERNEL=="hidraw*", ATTRS{idVendor}=="046d", GROUP="input", MODE="0660"
+KERNEL=="uinput", GROUP="input", MODE="0660"
+```
+
+Reload the rules and reconnect the receiver:
+
+```sh
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+```
+
+## systemd installation
+
+Build and install the binary, configuration, and service:
+
+```sh
+sudo install -Dm755 logitechd /usr/local/bin/logitechd
+sudo install -d -o root -g logitechd -m 0750 /etc/logitechd
+sudo install -o root -g logitechd -m 0640 config.yaml /etc/logitechd/config.yaml
+sudo install -Dm644 logitechd.service /usr/lib/systemd/system/logitechd.service
+```
+
+Enable and inspect the new service:
+
+```sh
+sudo systemctl daemon-reload
+sudo systemctl enable --now logitechd.service
+sudo systemctl status logitechd.service
+sudo journalctl -u logitechd.service -f
+```
+
+## Troubleshooting
+
+Confirm that the receiver is visible to USB:
+
+```sh
+lsusb | grep -i logitech
+```
+
+A Bolt receiver commonly appears as USB ID `046d:c548`. If the daemon reports
+permission errors, inspect the ownership of `/dev/hidraw*` and `/dev/uinput`,
+then reload the udev rules. If the device is not selected, verify its exact
+HID++ name and wireless slot in the YAML configuration.
+
+## Development
+
+Run the complete hardware-free verification suite:
+
+```sh
 go test ./...
 go test -race ./...
 go vet ./...
-
-go build -o logitechd ./cmd/logitechd
-./logitechd -config ./example.yaml
+go build ./...
 ```
 
-An example installation using `/usr/local` and `/etc` is:
+Linux HIDRAW, HID++, and `uinput` integration is isolated from the MX Master-specific feature
+package so additional device implementations can be added independently.
 
-```sh
-sudo install -d -o root -g logitechd -m 0750 /etc/logitechd
-sudo install -Dm755 logitechd /usr/local/bin/logitechd
-sudo install -o root -g logitechd -m 0640 example.yaml /etc/logitechd/config.yaml
-sudo install -Dm644 logitechd.service /usr/lib/systemd/system/logitechd.service
-systemctl daemon-reload
-systemctl enable --now logitechd.service
-```
+## Limitations
 
-The `logitechd.service` unit is independent: installing or starting it does
-not stop, replace, or alter any other service unit.
-
-## Status and limitations
-
-This implementation is clean-room work. It uses the project’s own protocol,
-configuration, lifecycle, feature, and uinput packages and does not copy source
-code, identifiers, comments, or structure from another implementation.
-
-Known limitations:
-
-* There is no pairing API initially. Devices must already be paired to the
-  receiver.
-* The daemon is Linux-specific because HIDRAW, uinput, and the systemd unit are
-  Linux facilities.
-* Device selection uses the configured exact name and/or wireless index; a
-  device that has been unpaired is not rediscovered through pairing.
-* Feature settings are applied when the target becomes ready. Hardware and
-  permission failures are reported clearly; ordinary receiver/device loss is
-  retried.
+* Pairing and unpairing are not implemented; devices must already be paired.
+* The daemon is Linux-specific.
+* The current feature and action implementation is MX Master-specific.
+* Device selection uses an exact name and/or wireless index.
