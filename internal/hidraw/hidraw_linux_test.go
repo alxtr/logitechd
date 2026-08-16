@@ -105,6 +105,37 @@ func TestOpenPathAndCloseWithoutHardware(t *testing.T) {
 	}
 }
 
+func TestOpenUsesSeparateReadAndBlockingWriteDescriptors(t *testing.T) {
+	path := t.TempDir() + "/hidraw-test"
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	device, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer device.Close()
+
+	if device.file == device.writeFile {
+		t.Fatal("Open returned the same descriptor for reads and writes")
+	}
+	readFlags, err := unix.FcntlInt(uintptr(device.file.Fd()), unix.F_GETFL, 0)
+	if err != nil {
+		t.Fatalf("get read descriptor flags: %v", err)
+	}
+	if readFlags&unix.O_NONBLOCK == 0 {
+		t.Fatalf("read descriptor flags = %#x, want O_NONBLOCK", readFlags)
+	}
+	writeFlags, err := unix.FcntlInt(uintptr(device.writeFile.Fd()), unix.F_GETFL, 0)
+	if err != nil {
+		t.Fatalf("get write descriptor flags: %v", err)
+	}
+	if writeFlags&unix.O_NONBLOCK != 0 {
+		t.Fatalf("write descriptor flags = %#x, do not want O_NONBLOCK", writeFlags)
+	}
+}
+
 func TestReadAndWriteReportWithoutHardware(t *testing.T) {
 	path := t.TempDir() + "/report"
 	if err := os.WriteFile(path, nil, 0o600); err != nil {
@@ -199,5 +230,5 @@ func newPipeDevice(t *testing.T) (*Device, *os.File) {
 		writer.Close()
 		t.Fatal(err)
 	}
-	return &Device{file: reader, path: "pipe"}, writer
+	return &Device{file: reader, writeFile: writer, path: "pipe"}, writer
 }

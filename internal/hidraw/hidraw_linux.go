@@ -30,15 +30,19 @@ const pollTimeout = 100 // milliseconds
 // ReadReport reads one kernel HIDRAW report into the supplied buffer; callers
 // should size it according to the device's report descriptor.
 type Device struct {
-	mu      sync.Mutex
-	readMu  sync.Mutex
-	writeMu sync.Mutex
-	file    *os.File
-	path    string
-	closed  bool
+	mu        sync.Mutex
+	readMu    sync.Mutex
+	writeMu   sync.Mutex
+	file      *os.File
+	writeFile *os.File
+	path      string
+	closed    bool
 }
 
-// Open opens path for bidirectional HIDRAW access.
+// Open opens path for bidirectional HIDRAW access. The read descriptor is
+// nonblocking so ReadReport can use poll and observe Close; the separate write
+// descriptor remains blocking because some HIDRAW devices reject nonblocking
+// output writes.
 func Open(path string) (*Device, error) {
 	if path == "" {
 		return nil, errors.New("hidraw: empty device path")
@@ -48,8 +52,13 @@ func Open(path string) (*Device, error) {
 	if err != nil {
 		return nil, fmt.Errorf("hidraw: open %q: %w", path, err)
 	}
+	writeFile, err := os.OpenFile(path, os.O_RDWR|unix.O_CLOEXEC, 0)
+	if err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("hidraw: open write %q: %w", path, err)
+	}
 
-	return &Device{file: file, path: path}, nil
+	return &Device{file: file, writeFile: writeFile, path: path}, nil
 }
 
 // Path returns the path used to open the device.
@@ -87,8 +96,22 @@ func (d *Device) Close() error {
 	}
 	d.closed = true
 	file := d.file
+	writeFile := d.writeFile
+	path := d.path
 	d.mu.Unlock()
-	return file.Close()
+
+	var result error
+	if file != nil {
+		if err := file.Close(); err != nil {
+			result = errors.Join(result, fmt.Errorf("hidraw: close read %q: %w", path, err))
+		}
+	}
+	if writeFile != nil && writeFile != file {
+		if err := writeFile.Close(); err != nil {
+			result = errors.Join(result, fmt.Errorf("hidraw: close write %q: %w", path, err))
+		}
+	}
+	return result
 }
 
 // ReadReport reads one report into dst. A short read is returned as-is because
@@ -159,39 +182,12 @@ func (d *Device) WriteReport(report []byte) error {
 	d.writeMu.Lock()
 	defer d.writeMu.Unlock()
 
-	fd, path, err := d.openFD()
+	file, path, err := d.openWriteFile()
 	if err != nil {
 		return err
 	}
 
-	if _, err := writeAll(report, func(part []byte) (int, error) {
-		for {
-			if d.isClosed() {
-				return 0, os.ErrClosed
-			}
-			revents, err := waitForEvent(fd, unix.POLLOUT, d.isClosed)
-			if err != nil {
-				return 0, err
-			}
-			if revents == 0 {
-				continue
-			}
-			if revents&unix.POLLNVAL != 0 {
-				if d.isClosed() {
-					return 0, os.ErrClosed
-				}
-				return 0, syscall.EBADF
-			}
-			n, err := unix.Write(fd, part)
-			if errors.Is(err, syscall.EINTR) || isWouldBlock(err) {
-				continue
-			}
-			if d.isClosed() {
-				return 0, os.ErrClosed
-			}
-			return n, err
-		}
-	}); err != nil {
+	if _, err := writeAll(report, file.Write); err != nil {
 		if d.isClosed() {
 			err = os.ErrClosed
 		}
@@ -210,6 +206,21 @@ func (d *Device) openFD() (int, string, error) {
 		return -1, "", err
 	}
 	return int(d.file.Fd()), d.path, nil
+}
+
+func (d *Device) openWriteFile() (*os.File, string, error) {
+	if d == nil {
+		return nil, "", os.ErrClosed
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.checkOpenLocked(); err != nil {
+		return nil, "", err
+	}
+	if d.writeFile == nil {
+		return nil, "", os.ErrClosed
+	}
+	return d.writeFile, d.path, nil
 }
 
 func (d *Device) checkOpenLocked() error {
