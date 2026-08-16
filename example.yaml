@@ -1,0 +1,33 @@
+# The path is intentionally omitted: the daemon scans /dev/hidraw* and probes
+# supported receivers. Use receiver.path when a host has several receivers.
+receiver:
+  type: bolt
+  # path: /dev/hidraw2
+
+device:
+  name: MX Master 3S
+  index: 2
+
+# These settings are optional. If a device firmware does not expose an
+# optional feature, the daemon keeps running and reports that fact in its log.
+smart_shift:
+  enabled: true
+  threshold: 25
+  torque: 60
+
+hires_scroll:
+  enabled: true
+  target: uinput
+
+thumb_wheel:
+  divert: true
+
+buttons:
+  0x0053: back
+  0x00c3:
+    action: key
+    value: KEY_LEFTMETA
+
+# For a Unifying receiver, change only the receiver type:
+# receiver:
+#   type: unifying

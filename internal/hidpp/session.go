@@ -264,6 +264,34 @@ func (s *Session) Close() error {
 	return s.closeError
 }
 
+// Done is closed when the shared transport reader stops, either because the
+// caller closed the session or because the physical device disappeared.
+// It is intended for lifecycle owners that need to reconnect without polling.
+func (s *Session) Done() <-chan struct{} {
+	if s == nil {
+		return nil
+	}
+	return s.done
+}
+
+// Err reports the terminal transport error after Done is closed. It returns
+// nil while the session is usable.
+func (s *Session) Err() error {
+	if s == nil {
+		return nil
+	}
+	s.stateMu.Lock()
+	closed, terminal := s.closed, s.terminal
+	s.stateMu.Unlock()
+	if !closed {
+		return nil
+	}
+	if terminal == nil {
+		return ErrClosedTransport
+	}
+	return &ClosedTransportError{Cause: terminal}
+}
+
 func (s *Session) transactionContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	if _, ok := ctx.Deadline(); ok || s.timeout == 0 {
 		return ctx, func() {}

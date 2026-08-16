@@ -1,0 +1,34 @@
+[Unit]
+Description=Clean-room Logitech HID++ input daemon
+Wants=systemd-udev-settle.service
+After=systemd-udev-settle.service local-fs.target
+
+[Service]
+Type=simple
+User=logitechd
+Group=input
+SupplementaryGroups=input
+ExecStart=/usr/local/bin/logitechd --config /etc/logitechd/config.yaml
+Restart=on-failure
+RestartSec=3s
+
+# Access is intentionally limited to the two device classes required by the
+# daemon. Filesystem permissions still need to grant the service account access.
+DeviceAllow=/dev/hidraw* rw
+DeviceAllow=/dev/uinput rw
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=yes
+PrivateDevices=no
+ProtectHome=yes
+ProtectSystem=strict
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

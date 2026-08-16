@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"sync"
@@ -704,7 +705,10 @@ type Opener func(string) (Opened, error)
 // Options controls receiver discovery. Path overrides Scanner when non-empty.
 // Opener is normally only supplied by tests or a future platform transport.
 type Options struct {
-	Path           string
+	Path string
+	// Kind restricts discovery to one receiver family. KindUnknown keeps the
+	// existing probe-both behavior.
+	Kind           Kind
 	Scanner        Scanner
 	Opener         Opener
 	SessionOptions hidpp.SessionOptions
@@ -750,6 +754,9 @@ func Discover(ctx context.Context, options Options) ([]*Receiver, error) {
 		}
 		opened, openErr := opener(path)
 		if openErr != nil {
+			if os.IsPermission(openErr) {
+				return nil, fmt.Errorf("receiver: permission denied opening %q: %w", path, openErr)
+			}
 			if options.Path != "" {
 				return nil, fmt.Errorf("receiver: open %q: %w", path, openErr)
 			}
@@ -770,6 +777,14 @@ func Discover(ctx context.Context, options Options) ([]*Receiver, error) {
 			_ = receiver.Close()
 			if options.Path != "" {
 				return nil, fmt.Errorf("receiver: probe %q: %w", path, probeErr)
+			}
+			continue
+		}
+		if options.Kind != KindUnknown && receiver.Kind() != options.Kind {
+			got := receiver.Kind()
+			_ = receiver.Close()
+			if options.Path != "" {
+				return nil, fmt.Errorf("receiver: %q is %s, want %s", path, got, options.Kind)
 			}
 			continue
 		}

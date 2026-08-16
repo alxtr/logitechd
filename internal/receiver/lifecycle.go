@@ -78,8 +78,9 @@ func (t ChildEventType) String() string {
 
 // ChildEvent is the common event form for users that prefer one callback.
 type ChildEvent struct {
-	Type  ChildEventType
-	Child *ChildDevice
+	Type     ChildEventType
+	Child    *ChildDevice
+	Metadata ChildMetadata
 }
 
 // SessionCallbacks exposes child lifecycle changes. Callbacks are invoked by
@@ -250,6 +251,42 @@ func (s *ReceiverSession) Receiver() *Receiver {
 		return nil
 	}
 	return s.receiver
+}
+
+type sessionHealth interface {
+	Done() <-chan struct{}
+	Err() error
+}
+
+// Done is closed when the physical receiver session stops. A lifecycle owner
+// can use it to distinguish a receiver loss from an ordinary child event and
+// begin discovery again. It also closes when Close is called.
+func (s *ReceiverSession) Done() <-chan struct{} {
+	if s == nil {
+		return nil
+	}
+	if health, ok := s.client.(sessionHealth); ok {
+		return health.Done()
+	}
+	return s.done
+}
+
+// Err returns the underlying transport error when the receiver session has
+// become unusable. It is nil while the session is active.
+func (s *ReceiverSession) Err() error {
+	if s == nil {
+		return nil
+	}
+	if health, ok := s.client.(sessionHealth); ok {
+		return health.Err()
+	}
+	s.stateMu.RLock()
+	closed := s.closed
+	s.stateMu.RUnlock()
+	if closed {
+		return errors.New("receiver: session closed")
+	}
+	return nil
 }
 
 // Child returns the current child for a wireless index.
@@ -499,8 +536,9 @@ func (s *ReceiverSession) emit(eventType ChildEventType, child *ChildDevice) {
 	if child == nil {
 		return
 	}
+	event := ChildEvent{Type: eventType, Child: child, Metadata: child.Metadata()}
 	if s.callbacks.Event != nil {
-		s.callbacks.Event(ChildEvent{Type: eventType, Child: child})
+		s.callbacks.Event(event)
 	}
 	switch eventType {
 	case ChildAdded:
