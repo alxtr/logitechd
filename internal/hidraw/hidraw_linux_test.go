@@ -7,6 +7,9 @@ import (
 	"os"
 	"syscall"
 	"testing"
+	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestWriteAllRetriesInterruptedAndShortWrites(t *testing.T) {
@@ -122,4 +125,67 @@ func TestReadAndWriteReportWithoutHardware(t *testing.T) {
 	if n != len(want) || string(got) != string(want) {
 		t.Fatalf("ReadReport() = %d, %x; want %d, %x", n, got, len(want), want)
 	}
+}
+
+func TestReadReportPollsForData(t *testing.T) {
+	device, writer := newPipeDevice(t)
+	defer writer.Close()
+	defer device.Close()
+
+	want := []byte{0x10, 0x20, 0x30}
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		_, _ = writer.Write(want)
+	}()
+
+	got := make([]byte, len(want))
+	n, err := device.ReadReport(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != len(want) || string(got) != string(want) {
+		t.Fatalf("ReadReport() = %d, %x; want %d, %x", n, got, len(want), want)
+	}
+}
+
+func TestReadReportReturnsPromptlyAfterClose(t *testing.T) {
+	device, writer := newPipeDevice(t)
+	defer writer.Close()
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := device.ReadReport(make([]byte, 8))
+		result <- err
+	}()
+	time.Sleep(10 * time.Millisecond)
+
+	started := time.Now()
+	if err := device.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-result:
+		if !errors.Is(err, os.ErrClosed) {
+			t.Fatalf("ReadReport error = %v, want os.ErrClosed", err)
+		}
+		if elapsed := time.Since(started); elapsed > time.Second {
+			t.Fatalf("ReadReport took %s to return after Close", elapsed)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ReadReport did not return after Close")
+	}
+}
+
+func newPipeDevice(t *testing.T) (*Device, *os.File) {
+	t.Helper()
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.SetNonblock(int(reader.Fd()), true); err != nil {
+		reader.Close()
+		writer.Close()
+		t.Fatal(err)
+	}
+	return &Device{file: reader, path: "pipe"}, writer
 }

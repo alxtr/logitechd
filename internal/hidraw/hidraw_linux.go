@@ -18,6 +18,11 @@ import (
 
 const maxDescriptorSize = 4096
 
+// pollTimeout bounds how long an I/O operation can remain asleep after Close
+// races with poll. HIDRAW normally wakes poll when a report arrives; the
+// timeout is only the fallback for Linux file-descriptor close semantics.
+const pollTimeout = 100 // milliseconds
+
 // Device is an opened HIDRAW character device.
 //
 // Access to the file handle is synchronized, and Close is allowed to run
@@ -39,7 +44,7 @@ func Open(path string) (*Device, error) {
 		return nil, errors.New("hidraw: empty device path")
 	}
 
-	file, err := os.OpenFile(path, os.O_RDWR|unix.O_CLOEXEC, 0)
+	file, err := os.OpenFile(path, os.O_RDWR|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, fmt.Errorf("hidraw: open %q: %w", path, err)
 	}
@@ -94,20 +99,51 @@ func (d *Device) ReadReport(dst []byte) (int, error) {
 		return 0, errors.New("hidraw: empty read buffer")
 	}
 
-	file, path, err := d.openFile()
-	if err != nil {
-		return 0, err
-	}
 	d.readMu.Lock()
 	defer d.readMu.Unlock()
 
+	fd, path, err := d.openFD()
+	if err != nil {
+		return 0, err
+	}
+
 	for {
-		n, err := file.Read(dst)
+		if d.isClosed() {
+			return 0, ioError("read", path, os.ErrClosed)
+		}
+
+		revents, err := waitForEvent(fd, unix.POLLIN|unix.POLLPRI, d.isClosed)
+		if err != nil {
+			if d.isClosed() {
+				err = os.ErrClosed
+			}
+			return 0, ioError("read", path, err)
+		}
+		if revents == 0 {
+			continue
+		}
+		if revents&unix.POLLNVAL != 0 {
+			if d.isClosed() {
+				return 0, ioError("read", path, os.ErrClosed)
+			}
+			return 0, ioError("read", path, syscall.EBADF)
+		}
+
+		n, err := unix.Read(fd, dst)
 		if errors.Is(err, syscall.EINTR) {
 			continue
 		}
+		if isWouldBlock(err) {
+			continue
+		}
+		if d.isClosed() {
+			return 0, ioError("read", path, os.ErrClosed)
+		}
 		if err != nil {
-			return n, fmt.Errorf("hidraw: read %q: %w", path, err)
+			return n, ioError("read", path, err)
+		}
+		if n == 0 {
+			return 0, ioError("read", path, io.EOF)
 		}
 		return n, nil
 	}
@@ -120,26 +156,60 @@ func (d *Device) WriteReport(report []byte) error {
 		return errors.New("hidraw: empty report")
 	}
 
-	file, path, err := d.openFile()
-	if err != nil {
-		return err
-	}
 	d.writeMu.Lock()
 	defer d.writeMu.Unlock()
 
-	if _, err := writeAll(report, file.Write); err != nil {
-		return fmt.Errorf("hidraw: write %q: %w", path, err)
+	fd, path, err := d.openFD()
+	if err != nil {
+		return err
+	}
+
+	if _, err := writeAll(report, func(part []byte) (int, error) {
+		for {
+			if d.isClosed() {
+				return 0, os.ErrClosed
+			}
+			revents, err := waitForEvent(fd, unix.POLLOUT, d.isClosed)
+			if err != nil {
+				return 0, err
+			}
+			if revents == 0 {
+				continue
+			}
+			if revents&unix.POLLNVAL != 0 {
+				if d.isClosed() {
+					return 0, os.ErrClosed
+				}
+				return 0, syscall.EBADF
+			}
+			n, err := unix.Write(fd, part)
+			if errors.Is(err, syscall.EINTR) || isWouldBlock(err) {
+				continue
+			}
+			if d.isClosed() {
+				return 0, os.ErrClosed
+			}
+			return n, err
+		}
+	}); err != nil {
+		if d.isClosed() {
+			err = os.ErrClosed
+		}
+		return ioError("write", path, err)
 	}
 	return nil
 }
 
-func (d *Device) openFile() (*os.File, string, error) {
+func (d *Device) openFD() (int, string, error) {
+	if d == nil {
+		return -1, "", os.ErrClosed
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if err := d.checkOpenLocked(); err != nil {
-		return nil, "", err
+		return -1, "", err
 	}
-	return d.file, d.path, nil
+	return int(d.file.Fd()), d.path, nil
 }
 
 func (d *Device) checkOpenLocked() error {
@@ -147,6 +217,44 @@ func (d *Device) checkOpenLocked() error {
 		return os.ErrClosed
 	}
 	return nil
+}
+
+func (d *Device) isClosed() bool {
+	if d == nil {
+		return true
+	}
+	d.mu.Lock()
+	closed := d.closed
+	d.mu.Unlock()
+	return closed
+}
+
+func waitForEvent(fd int, events int16, closed func() bool) (int16, error) {
+	for {
+		if closed != nil && closed() {
+			return 0, os.ErrClosed
+		}
+		fds := []unix.PollFd{{Fd: int32(fd), Events: events}}
+		_, err := unix.Poll(fds, pollTimeout)
+		if errors.Is(err, syscall.EINTR) {
+			continue
+		}
+		if err != nil {
+			return 0, err
+		}
+		if closed != nil && closed() {
+			return 0, os.ErrClosed
+		}
+		return fds[0].Revents, nil
+	}
+}
+
+func isWouldBlock(err error) bool {
+	return errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EWOULDBLOCK)
+}
+
+func ioError(operation, path string, err error) error {
+	return fmt.Errorf("hidraw: %s %q: %w", operation, path, err)
 }
 
 // writeAll is kept independent of Device so short-write and syscall error
