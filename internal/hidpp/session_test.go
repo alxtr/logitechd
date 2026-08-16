@@ -6,15 +6,18 @@ import (
 	"errors"
 	"os"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
 
 type memoryTransport struct {
-	reads  chan []byte
-	writes chan []byte
-	closed chan struct{}
-	once   sync.Once
+	reads      chan []byte
+	writes     chan []byte
+	closed     chan struct{}
+	once       sync.Once
+	readError  error
+	writeError error
 }
 
 func newMemoryTransport() *memoryTransport {
@@ -26,6 +29,9 @@ func newMemoryTransport() *memoryTransport {
 }
 
 func (t *memoryTransport) ReadReport(dst []byte) (int, error) {
+	if t.readError != nil {
+		return 0, t.readError
+	}
 	select {
 	case data := <-t.reads:
 		if len(data) > len(dst) {
@@ -38,6 +44,9 @@ func (t *memoryTransport) ReadReport(dst []byte) (int, error) {
 }
 
 func (t *memoryTransport) WriteReport(data []byte) error {
+	if t.writeError != nil {
+		return t.writeError
+	}
 	copyData := append([]byte(nil), data...)
 	select {
 	case t.writes <- copyData:
@@ -158,7 +167,9 @@ func TestSessionConvertsHIDPPErrorReport(t *testing.T) {
 		Type:        ReportTypeShort,
 		DeviceIndex: 0x03,
 		SubID:       RegisterErrorSubID,
-		Parameters:  []byte{RegisterGetSubID, 0x22, 0x02},
+		Function:    RegisterGetSubID >> 4,
+		SoftwareID:  RegisterGetSubID & 0x0f,
+		Parameters:  []byte{0x22, 0x02, 0x00},
 	})
 
 	got := <-resultCh
@@ -191,7 +202,9 @@ func TestLongRequestMatchesShortHIDPPErrorReport(t *testing.T) {
 		Type:        ReportTypeShort,
 		DeviceIndex: 0x04,
 		SubID:       RegisterErrorSubID,
-		Parameters:  []byte{RegisterSetSubID, 0x33, 0x02},
+		Function:    RegisterSetSubID >> 4,
+		SoftwareID:  RegisterSetSubID & 0x0f,
+		Parameters:  []byte{0x33, 0x02, 0x00},
 	})
 
 	got := <-resultCh
@@ -221,8 +234,8 @@ func TestLongRegisterAddressUsesLongSubIDs(t *testing.T) {
 		}{value: value, err: err}
 	}()
 	request := receiveWrite(t, transport)
-	if request[0] != LongReportID || request[2] != RegisterLongGetSubID || request[3] != 0xb3 {
-		t.Fatalf("long get request = %x", request)
+	if request[0] != ShortReportID || request[2] != RegisterLongGetSubID || request[3] != 0xb3 {
+		t.Fatalf("long-register get request = %x", request)
 	}
 	transport.respond(Report{
 		Type:        ReportTypeLong,
@@ -272,7 +285,7 @@ func TestLongRegisterReadCarriesSubregisterSelector(t *testing.T) {
 	}()
 
 	request := receiveWrite(t, transport)
-	wantPrefix := []byte{LongReportID, 0xff, RegisterLongGetSubID, 0xb5, 0x22}
+	wantPrefix := []byte{ShortReportID, 0xff, RegisterLongGetSubID, 0xb5, 0x22}
 	if !bytes.Equal(request[:len(wantPrefix)], wantPrefix) {
 		t.Fatalf("long subregister request = %x, want prefix %x", request, wantPrefix)
 	}
@@ -287,6 +300,69 @@ func TestLongRegisterReadCarriesSubregisterSelector(t *testing.T) {
 	result := <-resultCh
 	if result.err != nil || !bytes.Equal(result.value, []byte{1, 2, 3, 4, 5, 6, 7}) {
 		t.Fatalf("long subregister result = %x, %v", result.value, result.err)
+	}
+}
+
+func TestLongRegisterGetErrorUsesCommandByteAndPaddedParameters(t *testing.T) {
+	transport := newMemoryTransport()
+	session, err := NewDefaultSession(transport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := session.GetRegisterWithParameters(context.Background(), 0xff, 0x2b5, 8, 0x51)
+		result <- err
+	}()
+	request := receiveWrite(t, transport)
+	if !bytes.Equal(request[:5], []byte{ShortReportID, 0xff, RegisterLongGetSubID, 0xb5, 0x51}) {
+		t.Fatalf("empty-slot probe request = %x", request)
+	}
+	transport.respond(Report{
+		Type:        ReportTypeShort,
+		DeviceIndex: 0xff,
+		SubID:       RegisterErrorSubID,
+		Function:    RegisterLongGetSubID >> 4,
+		SoftwareID:  RegisterLongGetSubID & 0x0f,
+		Parameters:  []byte{0xb5, 0x02, 0x00},
+	})
+
+	got := <-result
+	var protocolErr *ProtocolError
+	if !errors.As(got, &protocolErr) || protocolErr.RequestSubID != RegisterLongGetSubID || protocolErr.RequestAddress != 0xb5 || protocolErr.Code != 0x02 {
+		t.Fatalf("empty-slot error = %T %+v", got, protocolErr)
+	}
+}
+
+func TestSessionIgnoresUnrelatedHIDRAWReports(t *testing.T) {
+	transport := newMemoryTransport()
+	session, err := NewDefaultSession(transport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	result := make(chan struct {
+		value []byte
+		err   error
+	}, 1)
+	go func() {
+		value, err := session.GetRegister(context.Background(), 0x01, 0x22, 1)
+		result <- struct {
+			value []byte
+			err   error
+		}{value: value, err: err}
+	}()
+	_ = receiveWrite(t, transport)
+	transport.reads <- []byte{0x01, 0x02, 0x03, 0x04, 0x05}
+	transport.reads <- nil
+	transport.respond(Report{Type: ReportTypeShort, DeviceIndex: 0x01, SubID: RegisterGetSubID, Function: 0x02, SoftwareID: 0x02, Parameters: []byte{0x7a}})
+
+	got := <-result
+	if got.err != nil || !bytes.Equal(got.value, []byte{0x7a}) {
+		t.Fatalf("result after unrelated reports = %x, %v", got.value, got.err)
 	}
 }
 
@@ -387,6 +463,25 @@ func TestSessionCloseUnblocksTransaction(t *testing.T) {
 	var closedErr *ClosedTransportError
 	if err := <-resultCh; !errors.As(err, &closedErr) || !errors.Is(err, ErrClosedTransport) {
 		t.Fatalf("transaction error = %T %v, want ClosedTransportError", err, err)
+	}
+}
+
+func TestSessionPreservesTerminalTransportErrors(t *testing.T) {
+	transport := newMemoryTransport()
+	transport.readError = syscall.EIO
+	session, err := NewDefaultSession(transport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	select {
+	case <-session.Done():
+	case <-time.After(time.Second):
+		t.Fatal("session did not stop after terminal transport error")
+	}
+	if !errors.Is(session.Err(), syscall.EIO) || !errors.Is(session.Err(), ErrClosedTransport) {
+		t.Fatalf("session error = %v, want EIO and ErrClosedTransport", session.Err())
 	}
 }
 

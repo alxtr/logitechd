@@ -26,10 +26,15 @@ device sleep/wake. It does not log action values or other configuration
 secrets.
 
 The runtime user needs read/write access to the selected `/dev/hidraw*` node and
-`/dev/uinput`. Most distributions provide this through udev rules and the
-`input` group; verify the actual ownership on the host and adjust the service
-account or a local udev rule as appropriate. The supplied systemd unit runs as
-`logitechd:input` and does not grant device access by itself.
+`/dev/uinput`. The supplied systemd unit runs as the dedicated `logitechd`
+user/group with `input` as a supplementary group; it does not create that
+account or grant device access by itself. Provision the account and verify the
+host's udev ownership before enabling the unit:
+
+```sh
+sudo useradd --system --user-group --no-create-home --shell /usr/sbin/nologin logitechd
+sudo usermod --append --groups input logitechd
+```
 
 ## Build, test, run, and install
 
@@ -48,9 +53,10 @@ go build -o logitechd ./cmd/logitechd
 An example installation using `/usr/local` and `/etc` is:
 
 ```sh
-install -Dm755 logitechd /usr/local/bin/logitechd
-install -Dm640 example.yaml /etc/logitechd/config.yaml
-install -Dm644 logitechd.service /usr/lib/systemd/system/logitechd.service
+sudo install -d -o root -g logitechd -m 0750 /etc/logitechd
+sudo install -Dm755 logitechd /usr/local/bin/logitechd
+sudo install -o root -g logitechd -m 0640 example.yaml /etc/logitechd/config.yaml
+sudo install -Dm644 logitechd.service /usr/lib/systemd/system/logitechd.service
 systemctl daemon-reload
 systemctl enable --now logitechd.service
 ```

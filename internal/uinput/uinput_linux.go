@@ -308,7 +308,6 @@ type inputEvent struct {
 	Type  uint16
 	Code  uint16
 	Value int32
-	Pad   int32
 }
 
 const (

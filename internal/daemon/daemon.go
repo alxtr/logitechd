@@ -210,9 +210,33 @@ type activeTarget struct {
 	action       Action
 }
 
+type deferredTarget struct {
+	child *receiver.ChildDevice
+}
+
 func (d *Daemon) runSession(ctx context.Context, session Session, token *connectionToken, events <-chan lifecycleSignal) error {
 	var active *activeTarget
+	var retryChild *receiver.ChildDevice
+	var retryTimer *time.Timer
+	var retryEvents <-chan time.Time
+	scheduleRetry := func(child *receiver.ChildDevice) {
+		if retryTimer != nil {
+			retryTimer.Stop()
+		}
+		retryChild = child
+		retryTimer = time.NewTimer(d.options.RetryInterval)
+		retryEvents = retryTimer.C
+	}
+	clearRetry := func() {
+		if retryTimer != nil {
+			retryTimer.Stop()
+		}
+		retryChild = nil
+		retryTimer = nil
+		retryEvents = nil
+	}
 	defer func() {
+		clearRetry()
 		if err := d.closeTarget(active); err != nil {
 			d.logger.Printf("target cleanup failed: %v", safeError(err))
 		}
@@ -244,22 +268,43 @@ func (d *Daemon) runSession(ctx context.Context, session Session, token *connect
 				continue
 			}
 			var err error
-			active, err = d.handleChildEvent(ctx, session, active, signal.event)
+			var deferred *deferredTarget
+			active, deferred, err = d.handleChildEvent(ctx, session, active, signal.event)
 			if err != nil {
 				return err
 			}
+			if deferred != nil {
+				scheduleRetry(deferred.child)
+			} else if signal.event.Type == receiver.ChildSleeping || signal.event.Type == receiver.ChildRemoved {
+				clearRetry()
+			}
+		case <-retryEvents:
+			child := retryChild
+			clearRetry()
+			if child != nil && child.State() != receiver.ChildStateReady {
+				continue
+			}
+			configured, retry, err := d.activateTarget(ctx, session, child)
+			if err != nil {
+				return err
+			}
+			if retry {
+				scheduleRetry(child)
+				continue
+			}
+			active = configured
 		}
 	}
 }
 
-func (d *Daemon) handleChildEvent(ctx context.Context, session Session, active *activeTarget, event receiver.ChildEvent) (*activeTarget, error) {
+func (d *Daemon) handleChildEvent(ctx context.Context, session Session, active *activeTarget, event receiver.ChildEvent) (*activeTarget, *deferredTarget, error) {
 	child := event.Child
 	metadata := event.Metadata
 	if child != nil {
 		metadata = child.Metadata()
 	}
 	if child == nil && metadata == (receiver.ChildMetadata{}) {
-		return active, nil
+		return active, nil, nil
 	}
 
 	switch event.Type {
@@ -271,30 +316,33 @@ func (d *Daemon) handleChildEvent(ctx context.Context, session Session, active *
 			active = nil
 			d.logger.Printf("target device index %d is %s", metadata.WirelessIndex, event.Type)
 		}
-		return active, nil
+		return active, nil, nil
 	case receiver.ChildReady:
 		if !targetMatchesEvent(child, metadata, d.settings.Device) {
-			return active, nil
+			return active, nil, nil
 		}
 		if active != nil && sameChild(active.child, child) {
-			return active, nil
+			return active, nil, nil
 		}
 		if active != nil {
 			if err := d.closeTarget(active); err != nil {
-				return nil, fmt.Errorf("daemon: replace target: %w", err)
+				return nil, nil, fmt.Errorf("daemon: replace target: %w", err)
 			}
 		}
-		configured, err := d.activateTarget(ctx, session, child)
+		configured, retry, err := d.activateTarget(ctx, session, child)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		return configured, nil
+		if retry {
+			return nil, &deferredTarget{child: child}, nil
+		}
+		return configured, nil, nil
 	default:
-		return active, nil
+		return active, nil, nil
 	}
 }
 
-func (d *Daemon) activateTarget(ctx context.Context, session Session, child *receiver.ChildDevice) (*activeTarget, error) {
+func (d *Daemon) activateTarget(ctx context.Context, session Session, child *receiver.ChildDevice) (*activeTarget, bool, error) {
 	index := byte(0)
 	if child != nil {
 		index = child.Metadata().WirelessIndex
@@ -304,12 +352,12 @@ func (d *Daemon) activateTarget(ctx context.Context, session Session, child *rec
 	if err != nil {
 		if isRecoverableDeviceError(err) {
 			d.logger.Printf("target configuration deferred: %v", safeError(err))
-			return nil, nil
+			return nil, true, nil
 		}
-		return nil, fmt.Errorf("daemon: configure target: %w", err)
+		return nil, false, fmt.Errorf("daemon: configure target: %w", err)
 	}
 	if configured == nil {
-		return nil, errors.New("daemon: configurator returned nil configurator")
+		return nil, false, errors.New("daemon: configurator returned nil configurator")
 	}
 	if err := configured.Apply(ctx); err != nil {
 		if errors.Is(err, mxmaster.ErrNoFeature) {
@@ -317,30 +365,30 @@ func (d *Daemon) activateTarget(ctx context.Context, session Session, child *rec
 		} else if isRecoverableDeviceError(err) {
 			_ = configured.Close()
 			d.logger.Printf("target configuration deferred: %v", safeError(err))
-			return nil, nil
+			return nil, true, nil
 		} else {
 			_ = configured.Close()
-			return nil, fmt.Errorf("daemon: apply target configuration: %w", err)
+			return nil, false, fmt.Errorf("daemon: apply target configuration: %w", err)
 		}
 	}
 
 	output, err := d.options.OutputFactory()
 	if err != nil {
 		_ = configured.Close()
-		return nil, fmt.Errorf("daemon: open input output: %w", err)
+		return nil, false, fmt.Errorf("daemon: open input output: %w", err)
 	}
 	action, err := configured.StartActions(ctx, output)
 	if err != nil {
 		_ = output.Close()
 		_ = configured.Close()
-		return nil, fmt.Errorf("daemon: start actions: %w", err)
+		return nil, false, fmt.Errorf("daemon: start actions: %w", err)
 	}
 	if action == nil {
 		_ = output.Close()
 		_ = configured.Close()
-		return nil, errors.New("daemon: configurator returned nil action handler")
+		return nil, false, errors.New("daemon: configurator returned nil action handler")
 	}
-	return &activeTarget{child: child, configurator: configured, action: action}, nil
+	return &activeTarget{child: child, configurator: configured, action: action}, false, nil
 }
 
 func (d *Daemon) closeTarget(active *activeTarget) error {
@@ -449,7 +497,9 @@ func isRecoverableDeviceError(err error) bool {
 	return errors.Is(err, mxmaster.ErrDeviceNotFound) ||
 		errors.Is(err, hidpp.ErrClosedTransport) ||
 		errors.Is(err, hidpp.ErrTimeout) ||
-		errors.Is(err, os.ErrClosed)
+		errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, os.ErrClosed) ||
+		errors.Is(err, syscall.EIO) || errors.Is(err, syscall.ENODEV) || errors.Is(err, syscall.ENXIO)
 }
 
 func safeError(err error) error {

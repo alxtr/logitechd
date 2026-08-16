@@ -34,11 +34,11 @@ func TestDeviceSessionValidatesDiscoversCallsAndRoutesEvents(t *testing.T) {
 		}{version: version, err: err}
 	}()
 	request := receiveWrite(t, transport)
-	want := []byte{ShortReportID, 2, RootProtocolSubID, RootProtocolCommand, 0, 0, RootPingByte}
+	want := []byte{ShortReportID, 2, RootProtocolSubID, 0x12, 0, 0, RootPingByte}
 	if !bytes.Equal(request, want) {
 		t.Fatalf("ping request = %x, want %x", request, want)
 	}
-	transport.respond(Report{Type: ReportTypeShort, DeviceIndex: 2, SubID: RootProtocolSubID, Function: 1, Parameters: []byte{2, 0, RootPingByte}})
+	transport.respond(Report{Type: ReportTypeShort, DeviceIndex: 2, SubID: RootProtocolSubID, Function: 1, SoftwareID: ClientSoftwareID, Parameters: []byte{2, 0, RootPingByte}})
 	version := <-versionResult
 	if version.err != nil || version.version != (ProtocolVersion{Major: 2, Minor: 0}) {
 		t.Fatalf("version = %+v, error=%v", version.version, version.err)
@@ -56,10 +56,10 @@ func TestDeviceSessionValidatesDiscoversCallsAndRoutesEvents(t *testing.T) {
 		}{info: info, err: err}
 	}()
 	request = receiveWrite(t, transport)
-	if request[0] != LongReportID || request[1] != 2 || request[2] != RootFeatureIndex || request[3] != 0 || !bytes.Equal(request[4:6], []byte{0x12, 0x34}) {
+	if request[0] != LongReportID || request[1] != 2 || request[2] != RootFeatureIndex || request[3] != 0x02 || !bytes.Equal(request[4:6], []byte{0x12, 0x34}) {
 		t.Fatalf("feature lookup request = %x", request)
 	}
-	transport.respond(Report{Type: ReportTypeLong, DeviceIndex: 2, SubID: RootFeatureIndex, Parameters: []byte{7, 0x03, 0x02}})
+	transport.respond(Report{Type: ReportTypeLong, DeviceIndex: 2, SubID: RootFeatureIndex, SoftwareID: ClientSoftwareID, Parameters: []byte{7, 0x03, 0x02}})
 	lookup := <-lookupResult
 	if lookup.err != nil || lookup.info != (FeatureInfo{ID: 0x1234, Index: 7, Type: 3, Version: 2}) {
 		t.Fatalf("feature lookup = %+v, error=%v", lookup.info, lookup.err)
@@ -97,7 +97,7 @@ func TestDeviceSessionValidatesDiscoversCallsAndRoutesEvents(t *testing.T) {
 	events := make(chan Report, 1)
 	unsub := child.SubscribeEvents(func(report Report) { events <- report })
 	defer unsub()
-	transport.respond(Report{Type: ReportTypeLong, DeviceIndex: 2, SubID: 7, Function: 0, SoftwareID: 2, Parameters: []byte{1, 2, 3}})
+	transport.respond(Report{Type: ReportTypeLong, DeviceIndex: 2, SubID: 7, Function: 0, SoftwareID: ClientSoftwareID, Parameters: []byte{1, 2, 3}})
 	select {
 	case event := <-events:
 		if event.DeviceIndex != 2 || event.SubID != 7 || event.SoftwareID != 2 {
@@ -111,7 +111,7 @@ func TestDeviceSessionValidatesDiscoversCallsAndRoutesEvents(t *testing.T) {
 		t.Fatal(err)
 	}
 	request = receiveWrite(t, transport)
-	if request[1] != 2 || request[2] != 7 || request[3] != 0x31 || request[4] != 0x99 {
+	if request[1] != 2 || request[2] != 7 || request[3] != 0x33 || request[4] != 0x99 {
 		t.Fatalf("no-response call = %x", request)
 	}
 }
@@ -135,10 +135,10 @@ func TestDeviceSessionMapsHIDPP20ProtocolErrorsAndUnsupportedValues(t *testing.T
 		result <- err
 	}()
 	_ = receiveWrite(t, transport)
-	transport.respond(Report{Type: ReportTypeLong, DeviceIndex: 3, SubID: FeatureErrorSubID, Function: 0, SoftwareID: 9, Parameters: []byte{0x20, 0x09}})
+	transport.respond(Report{Type: ReportTypeLong, DeviceIndex: 3, SubID: FeatureErrorSubID, Function: 0, SoftwareID: 9, Parameters: []byte{0x22, 0x09}})
 	protocolErr := <-result
 	var typed *ProtocolError
-	if !errors.As(protocolErr, &typed) || !errors.Is(protocolErr, ErrProtocol) || typed.RequestSubID != 9 || typed.RequestAddress != 0x20 || typed.Code != 0x09 {
+	if !errors.As(protocolErr, &typed) || !errors.Is(protocolErr, ErrProtocol) || typed.RequestSubID != 9 || typed.RequestAddress != 0x22 || typed.Code != 0x09 {
 		t.Fatalf("protocol error = %T %+v", protocolErr, protocolErr)
 	}
 

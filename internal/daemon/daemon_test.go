@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/atremb/logitechd/internal/config"
+	"github.com/atremb/logitechd/internal/hidpp"
 	"github.com/atremb/logitechd/internal/mxmaster"
 	"github.com/atremb/logitechd/internal/receiver"
 	"github.com/atremb/logitechd/internal/uinput"
@@ -93,17 +94,19 @@ func (a *fakeAction) Stop() error {
 }
 
 type fakeConfigurator struct {
-	mu     sync.Mutex
-	apply  int
-	closed int
-	action *fakeAction
+	mu       sync.Mutex
+	apply    int
+	closed   int
+	action   *fakeAction
+	applyErr error
 }
 
 func (c *fakeConfigurator) Apply(context.Context) error {
 	c.mu.Lock()
 	c.apply++
+	err := c.applyErr
 	c.mu.Unlock()
-	return nil
+	return err
 }
 func (c *fakeConfigurator) StartActions(_ context.Context, output mxmaster.Output) (Action, error) {
 	c.mu.Lock()
@@ -242,6 +245,34 @@ func TestDaemonHandlesSleepWakeAndRemoval(t *testing.T) {
 	second := <-created
 	offer.onEvent(receiver.ChildEvent{Type: receiver.ChildRemoved, Metadata: target})
 	waitFor(t, second.actionStopped)
+	cancel()
+	if err := <-results; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDaemonRetriesTransientTargetConfiguration(t *testing.T) {
+	offers := make(chan sessionOffer, 1)
+	created := make(chan *fakeConfigurator, 2)
+	attempt := 0
+	_, cancel, results, _ := newTestDaemon(t, validSettings(), offers, func() *fakeConfigurator {
+		attempt++
+		configured := &fakeConfigurator{}
+		if attempt == 1 {
+			configured.applyErr = hidpp.ErrTimeout
+		}
+		created <- configured
+		return configured
+	})
+	offer := <-offers
+	offer.onEvent(receiver.ChildEvent{Type: receiver.ChildReady, Metadata: receiver.ChildMetadata{WirelessIndex: 2, Name: "MX Master 3S"}})
+	<-created
+	select {
+	case <-created:
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatal("transient target configuration was not retried")
+	}
 	cancel()
 	if err := <-results; err != nil {
 		t.Fatal(err)

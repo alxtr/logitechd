@@ -6,7 +6,7 @@ After=systemd-udev-settle.service local-fs.target
 [Service]
 Type=simple
 User=logitechd
-Group=input
+Group=logitechd
 SupplementaryGroups=input
 ExecStart=/usr/local/bin/logitechd --config /etc/logitechd/config.yaml
 Restart=on-failure

@@ -22,9 +22,9 @@ const (
 )
 
 // GetRegister reads one HID++ 1.0 register. size is the meaningful number of
-// returned register bytes and selects the report format: one to three bytes
-// use a short report, and four to sixteen bytes use a long report. The HID++
-// long-register address range also selects a long report.
+// returned register bytes; it does not select the request framing. GET
+// requests use a short report when their selector parameters fit in three
+// bytes, including long-register GETs.
 func (s *Session) GetRegister(ctx context.Context, deviceIndex byte, address uint16, size int) ([]byte, error) {
 	return s.GetRegisterWithParameters(ctx, deviceIndex, address, size)
 }
@@ -33,7 +33,10 @@ func (s *Session) GetRegister(ctx context.Context, deviceIndex byte, address uin
 // carries a subregister selector. The ordinary GetRegister API remains
 // unchanged for existing callers.
 func (s *Session) GetRegisterWithParameters(ctx context.Context, deviceIndex byte, address uint16, size int, requestParameters ...byte) ([]byte, error) {
-	reportType, err := registerReportType(address, size)
+	if err := validateRegisterResponseSize(size); err != nil {
+		return nil, err
+	}
+	reportType, err := registerGetReportType(address, len(requestParameters))
 	if err != nil {
 		return nil, err
 	}
@@ -110,6 +113,24 @@ func (s *Session) setRegister(ctx context.Context, deviceIndex byte, address uin
 }
 
 func registerReportType(address uint16, parameterSize int) (ReportType, error) {
+	return registerSetReportType(address, parameterSize)
+}
+
+func registerGetReportType(address uint16, requestParameterSize int) (ReportType, error) {
+	if _, _, err := registerRequestFields(address, false); err != nil {
+		return ReportTypeUnknown, err
+	}
+	switch {
+	case requestParameterSize >= 0 && requestParameterSize <= shortRegisterParameterSize:
+		return ReportTypeShort, nil
+	case requestParameterSize <= longRegisterParameterSize:
+		return ReportTypeLong, nil
+	default:
+		return ReportTypeUnknown, unsupportedRegisterPayload(requestParameterSize)
+	}
+}
+
+func registerSetReportType(address uint16, parameterSize int) (ReportType, error) {
 	if _, _, err := registerRequestFields(address, false); err != nil {
 		return ReportTypeUnknown, err
 	}
@@ -124,6 +145,13 @@ func registerReportType(address uint16, parameterSize int) (ReportType, error) {
 	default:
 		return ReportTypeUnknown, unsupportedRegisterPayload(parameterSize)
 	}
+}
+
+func validateRegisterResponseSize(size int) error {
+	if size < 1 || size > longRegisterParameterSize {
+		return unsupportedRegisterPayload(size)
+	}
+	return nil
 }
 
 func registerRequestFields(address uint16, write bool) (byte, byte, error) {

@@ -130,6 +130,30 @@ func TestProbeRecognizesUnifyingAndEnumeratesSlots(t *testing.T) {
 	}
 }
 
+func TestEnumeratePairedSkipsEmptySlotProtocolErrors(t *testing.T) {
+	client := unifyingClient()
+	client.errors = make(map[registerKey]error)
+	client.errors[registerKey{address: ReceiverInfoRegister, params: string([]byte{unifyingPairInfoBase})}] = &hidpp.ProtocolError{
+		Code:           0x02,
+		RequestSubID:   hidpp.RegisterLongGetSubID,
+		RequestAddress: byte(ReceiverInfoRegister & 0xff),
+	}
+	r, err := New(Opened{Client: client})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	r.kind = KindUnifying
+
+	devices, err := r.EnumeratePaired(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(devices) != 1 || devices[0].Slot != 2 {
+		t.Fatalf("devices after empty-slot error = %+v, want only slot 2", devices)
+	}
+}
+
 func TestBoltPairingAndNameLayouts(t *testing.T) {
 	client := &fakeRegisterClient{
 		responses: map[registerKey][]byte{

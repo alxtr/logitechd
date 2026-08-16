@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -341,6 +342,9 @@ func (s *Session) readLoop() {
 		data := buffer[:n]
 		report, err := Parse(data)
 		if err != nil {
+			if errors.Is(err, ErrNotHIDPPReport) {
+				continue
+			}
 			s.failPending(malformedResponse(data, err))
 			continue
 		}
@@ -398,15 +402,15 @@ func (s *Session) dispatch(report Report) {
 }
 
 func protocolErrorFromReport(report Report) (*ProtocolError, error) {
-	if len(report.Parameters) < 3 {
-		return nil, malformedResponse(nil, fmt.Errorf("HID++ error report has %d parameters, need 3", len(report.Parameters)))
+	if len(report.Parameters) < 2 {
+		return nil, malformedResponse(nil, fmt.Errorf("HID++ error report has %d parameters, need 2", len(report.Parameters)))
 	}
 	parameters := append([]byte(nil), report.Parameters...)
 	return &ProtocolError{
 		DeviceIndex:    report.DeviceIndex,
-		RequestSubID:   parameters[0],
-		RequestAddress: parameters[1],
-		Code:           parameters[2],
+		RequestSubID:   report.CommandByte(),
+		RequestAddress: parameters[0],
+		Code:           parameters[1],
 		Parameters:     parameters,
 	}, nil
 }
@@ -558,5 +562,6 @@ func contextError(operation string, original context.Context, err error) error {
 }
 
 func isTransportClosed(err error) bool {
-	return errors.Is(err, os.ErrClosed) || errors.Is(err, io.ErrClosedPipe)
+	return errors.Is(err, os.ErrClosed) || errors.Is(err, io.ErrClosedPipe) ||
+		errors.Is(err, syscall.EIO) || errors.Is(err, syscall.ENODEV) || errors.Is(err, syscall.ENXIO)
 }

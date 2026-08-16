@@ -118,6 +118,8 @@ type Configurator struct {
 
 	eventMu   sync.RWMutex
 	closeOnce sync.Once
+	closeErr  error
+	cleanup   []func(context.Context) error
 }
 
 // NewConfigurator selects a child, discovers optional features, and starts a
@@ -278,6 +280,7 @@ func (c *Configurator) applySmartShift(ctx context.Context) error {
 	if c.features.SmartShift == nil {
 		return fmt.Errorf("%w: smart shift", ErrNoFeature)
 	}
+	var original *SmartShiftStatus
 	if setting.Enabled != nil || setting.Threshold != nil {
 		status, err := c.features.SmartShift.GetStatus(ctx)
 		if err != nil {
@@ -290,16 +293,36 @@ func (c *Configurator) applySmartShift(ctx context.Context) error {
 		if setting.Threshold != nil {
 			threshold = byte(*setting.Threshold)
 		}
+		original = &status
+		c.addSmartShiftCleanup(status)
 		if err := c.features.SmartShift.SetStatus(ctx, enabled, threshold); err != nil {
 			return fmt.Errorf("mxmaster: set smart shift: %w", err)
 		}
 	}
 	if setting.Torque != nil {
+		if original == nil {
+			status, err := c.features.SmartShift.GetStatus(ctx)
+			if err != nil {
+				return fmt.Errorf("mxmaster: read smart shift: %w", err)
+			}
+			original = &status
+			c.addSmartShiftCleanup(status)
+		}
 		if err := c.features.SmartShift.SetTorque(ctx, byte(*setting.Torque)); err != nil {
 			return fmt.Errorf("mxmaster: set smart shift torque: %w", err)
 		}
 	}
 	return nil
+}
+
+func (c *Configurator) addSmartShiftCleanup(status SmartShiftStatus) {
+	c.addCleanup(func(ctx context.Context) error {
+		result := c.features.SmartShift.SetStatus(ctx, status.Enabled, status.Threshold)
+		if status.TorqueSupported {
+			result = errors.Join(result, c.features.SmartShift.SetTorque(ctx, status.Torque))
+		}
+		return result
+	})
 }
 
 func (c *Configurator) applyWheel(ctx context.Context) error {
@@ -315,10 +338,32 @@ func (c *Configurator) applyWheel(ctx context.Context) error {
 		return fmt.Errorf("mxmaster: read hi-res wheel: %w", err)
 	}
 	if setting.Enabled != nil {
+		original := mode
+		c.addCleanup(func(ctx context.Context) error {
+			if err := c.features.HiResWheel.SetMode(ctx, original); err != nil {
+				fallback := original
+				fallback.UseHIDPP = false
+				fallback.HighResolution = false
+				return errors.Join(err, c.features.HiResWheel.SetMode(ctx, fallback))
+			}
+			return nil
+		})
 		mode.UseHIDPP = *setting.Enabled
 		mode.HighResolution = *setting.Enabled
 	}
 	if setting.Invert != nil {
+		if setting.Enabled == nil {
+			original := mode
+			c.addCleanup(func(ctx context.Context) error {
+				if err := c.features.HiResWheel.SetMode(ctx, original); err != nil {
+					fallback := original
+					fallback.UseHIDPP = false
+					fallback.HighResolution = false
+					return errors.Join(err, c.features.HiResWheel.SetMode(ctx, fallback))
+				}
+				return nil
+			})
+		}
 		mode.Invert = *setting.Invert
 	}
 	if setting.Enabled != nil || setting.Invert != nil {
@@ -357,9 +402,25 @@ func (c *Configurator) applyThumbWheel(ctx context.Context) error {
 		return fmt.Errorf("mxmaster: read thumb wheel: %w", err)
 	}
 	if setting.Divert != nil {
+		original := status
+		c.addCleanup(func(ctx context.Context) error {
+			if err := c.features.ThumbWheel.SetReporting(ctx, original.Diverted, original.Inverted); err != nil {
+				return errors.Join(err, c.features.ThumbWheel.SetReporting(ctx, false, original.Inverted))
+			}
+			return nil
+		})
 		status.Diverted = *setting.Divert
 	}
 	if setting.Invert != nil {
+		if setting.Divert == nil {
+			original := status
+			c.addCleanup(func(ctx context.Context) error {
+				if err := c.features.ThumbWheel.SetReporting(ctx, original.Diverted, original.Inverted); err != nil {
+					return errors.Join(err, c.features.ThumbWheel.SetReporting(ctx, false, original.Inverted))
+				}
+				return nil
+			})
+		}
 		status.Inverted = *setting.Invert
 	}
 	if setting.Divert != nil || setting.Invert != nil {
@@ -379,6 +440,17 @@ func (c *Configurator) applyButtons(ctx context.Context) error {
 	}
 	for cid, action := range c.settings.Buttons {
 		diverted := !strings.EqualFold(strings.TrimSpace(action.Action), "none")
+		original, err := c.features.Controls.Reporting(ctx, uint16(cid))
+		if err != nil {
+			return fmt.Errorf("mxmaster: read button %s: %w", cid, err)
+		}
+		c.addCleanup(func(ctx context.Context) error {
+			if _, err := c.features.Controls.SetTemporaryDiversion(ctx, original.CID, original.Diverted); err != nil {
+				_, fallbackErr := c.features.Controls.SetTemporaryDiversion(ctx, original.CID, false)
+				return errors.Join(err, fallbackErr)
+			}
+			return nil
+		})
 		if _, err := c.features.Controls.SetTemporaryDiversion(ctx, uint16(cid), diverted); err != nil {
 			return fmt.Errorf("mxmaster: configure button %s: %w", cid, err)
 		}
@@ -392,11 +464,28 @@ func (c *Configurator) Close() error {
 	}
 	c.closeOnce.Do(func() {
 		c.eventMu.Lock()
-		defer c.eventMu.Unlock()
 		if c.unsub != nil {
 			c.unsub()
 		}
 		close(c.events)
+		cleanup := append([]func(context.Context) error(nil), c.cleanup...)
+		c.cleanup = nil
+		c.eventMu.Unlock()
+
+		cleanupContext, cancel := context.WithTimeout(context.Background(), hidpp.DefaultTransactionTimeout)
+		defer cancel()
+		for index := len(cleanup) - 1; index >= 0; index-- {
+			c.closeErr = errors.Join(c.closeErr, cleanup[index](cleanupContext))
+		}
 	})
-	return nil
+	return c.closeErr
+}
+
+func (c *Configurator) addCleanup(cleanup func(context.Context) error) {
+	if c == nil || cleanup == nil {
+		return
+	}
+	c.eventMu.Lock()
+	c.cleanup = append(c.cleanup, cleanup)
+	c.eventMu.Unlock()
 }

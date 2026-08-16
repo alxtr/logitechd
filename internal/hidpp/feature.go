@@ -21,6 +21,13 @@ const (
 	RootProtocolCommand byte = 0x10
 	// RootPingByte is echoed by a HID++ 2.0 root protocol-version response.
 	RootPingByte byte = 0x5a
+	// ClientSoftwareID identifies normal requests made by this implementation.
+	// HID++ reserves zero for firmware/internal use on devices that require a
+	// client software ID.
+	ClientSoftwareID byte = 0x02
+	// NoResponseSoftwareID identifies commands deliberately sent without an
+	// acknowledgement waiter.
+	NoResponseSoftwareID byte = 0x03
 )
 
 // ExchangeClient is the portion of Session needed by a child device client.
@@ -122,12 +129,13 @@ func (d *DeviceSession) Ping(ctx context.Context) (ProtocolVersion, error) {
 	if err := d.checkUsable(); err != nil {
 		return ProtocolVersion{}, err
 	}
+	command := (RootProtocolCommand & 0xf0) | ClientSoftwareID
 	response, err := d.client.Exchange(ctx, Request{Report: Report{
 		Type:        ReportTypeShort,
 		DeviceIndex: d.deviceIndex,
 		SubID:       RootProtocolSubID,
-		Function:    RootProtocolCommand >> 4,
-		SoftwareID:  RootProtocolCommand & 0x0f,
+		Function:    command >> 4,
+		SoftwareID:  command & 0x0f,
 		Parameters:  []byte{0x00, 0x00, RootPingByte},
 	}, ResponseSubID: RootProtocolSubID})
 	if err != nil {
@@ -141,7 +149,7 @@ func (d *DeviceSession) Ping(ctx context.Context) (ProtocolVersion, error) {
 			DeviceIndex:    d.deviceIndex,
 			Code:           response.Parameters[2],
 			RequestSubID:   RootProtocolSubID,
-			RequestAddress: RootProtocolCommand,
+			RequestAddress: command,
 			Parameters:     append([]byte(nil), response.Parameters...),
 		}
 	}
@@ -263,7 +271,7 @@ func (d *DeviceSession) CallFeature(ctx context.Context, featureID uint16, funct
 
 // CallWithSoftwareID is the explicit-nibble form of Call.
 func (d *DeviceSession) CallWithSoftwareID(ctx context.Context, featureIndex, function, softwareID byte, params []byte) ([]byte, error) {
-	if function > 0x0f || softwareID > 0x0f {
+	if function > 0x0f || softwareID == 0 || softwareID > 0x0f {
 		return nil, unsupportedFeatureCommand(function, softwareID)
 	}
 	return d.Call(ctx, featureIndex, function<<4|softwareID, params)
@@ -284,7 +292,7 @@ func (d *DeviceSession) CallNoResponse(ctx context.Context, featureIndex, functi
 		DeviceIndex: d.deviceIndex,
 		SubID:       featureIndex,
 		Function:    function >> 4,
-		SoftwareID:  function & 0x0f,
+		SoftwareID:  NoResponseSoftwareID,
 		Parameters:  append([]byte(nil), params...),
 	})
 }
@@ -398,6 +406,7 @@ func (d *DeviceSession) callIndex(ctx context.Context, featureIndex, function by
 }
 
 func (d *DeviceSession) callIndexLocked(ctx context.Context, featureIndex, function byte, params []byte) (Report, error) {
+	function = normalFeatureCommand(function)
 	request := Report{
 		Type:        ReportTypeLong,
 		DeviceIndex: d.deviceIndex,
@@ -407,6 +416,13 @@ func (d *DeviceSession) callIndexLocked(ctx context.Context, featureIndex, funct
 		Parameters:  append([]byte(nil), params...),
 	}
 	return d.client.Exchange(ctx, Request{Report: request, ResponseSubID: featureIndex})
+}
+
+func normalFeatureCommand(command byte) byte {
+	if command&0x0f == 0 {
+		return command | ClientSoftwareID
+	}
+	return command
 }
 
 func (d *DeviceSession) checkUsable() error {

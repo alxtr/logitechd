@@ -153,7 +153,7 @@ func (c *CID) UnmarshalYAML(node *yaml.Node) error {
 	}
 	parsed, err := strconv.ParseUint(hex, 16, 16)
 	if err != nil {
-		return fmt.Errorf("%w: %q: %v", ErrInvalidCID, value, err)
+		return fmt.Errorf("%w: %q: %w", ErrInvalidCID, value, err)
 	}
 	*c = CID(parsed)
 	return nil
@@ -195,7 +195,7 @@ func Load(data []byte) (Config, error) {
 		if err == io.EOF {
 			value = Config{}
 		} else {
-			return Config{}, fmt.Errorf("%w: YAML: %v", ErrInvalidConfig, err)
+			return Config{}, fmt.Errorf("%w: YAML: %w", ErrInvalidConfig, err)
 		}
 	}
 	var extra any
@@ -203,7 +203,7 @@ func Load(data []byte) (Config, error) {
 		if err == nil {
 			return Config{}, fmt.Errorf("%w: multiple YAML documents are not allowed", ErrInvalidConfig)
 		}
-		return Config{}, fmt.Errorf("%w: trailing YAML: %v", ErrInvalidConfig, err)
+		return Config{}, fmt.Errorf("%w: trailing YAML: %w", ErrInvalidConfig, err)
 	}
 	if err := value.Validate(); err != nil {
 		return Config{}, err

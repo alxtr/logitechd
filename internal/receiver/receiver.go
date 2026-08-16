@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"syscall"
 	"unicode/utf8"
 
 	"github.com/atremb/logitechd/internal/hidpp"
@@ -581,7 +582,7 @@ func probe(ctx context.Context, client RegisterClient, metadata DeviceMetadata) 
 	}
 	connection, err := client.GetRegister(ctx, ReceiverDeviceIndex, ConnectionRegister, 1)
 	if err != nil {
-		return KindUnknown, fmt.Errorf("%w: receiver connection probe: %v", ErrNotReceiver, err)
+		return KindUnknown, fmt.Errorf("receiver connection probe: %w", errors.Join(ErrNotReceiver, err))
 	}
 	if len(connection) < 1 {
 		return KindUnknown, malformed("receiver connection", len(connection), 1)
@@ -606,6 +607,9 @@ func probe(ctx context.Context, client RegisterClient, metadata DeviceMetadata) 
 				}
 				return KindBolt, nil
 			}
+			if isTerminalTransportError(err) {
+				return KindUnknown, fmt.Errorf("receiver: Bolt identity probe: %w", err)
+			}
 		case KindUnifying:
 			data, err := getRegister(ctx, client, ReceiverInfoRegister, 7, 0x03)
 			if err == nil {
@@ -614,9 +618,17 @@ func probe(ctx context.Context, client RegisterClient, metadata DeviceMetadata) 
 				}
 				return KindUnifying, nil
 			}
+			if isTerminalTransportError(err) {
+				return KindUnknown, fmt.Errorf("receiver: Unifying identity probe: %w", err)
+			}
 		}
 	}
 	return KindUnknown, ErrNotReceiver
+}
+
+func isTerminalTransportError(err error) bool {
+	return errors.Is(err, os.ErrClosed) || errors.Is(err, syscall.EIO) ||
+		errors.Is(err, syscall.ENODEV) || errors.Is(err, syscall.ENXIO)
 }
 
 func isEmptySlotError(err error) bool {
@@ -748,6 +760,7 @@ func Discover(ctx context.Context, options Options) ([]*Receiver, error) {
 	}
 
 	result := make([]*Receiver, 0, len(paths))
+	var terminalErr error
 	for _, path := range paths {
 		if path == "" {
 			continue
@@ -759,6 +772,9 @@ func Discover(ctx context.Context, options Options) ([]*Receiver, error) {
 			}
 			if options.Path != "" {
 				return nil, fmt.Errorf("receiver: open %q: %w", path, openErr)
+			}
+			if isTerminalTransportError(openErr) {
+				terminalErr = openErr
 			}
 			continue
 		}
@@ -778,6 +794,9 @@ func Discover(ctx context.Context, options Options) ([]*Receiver, error) {
 			if options.Path != "" {
 				return nil, fmt.Errorf("receiver: probe %q: %w", path, probeErr)
 			}
+			if isTerminalTransportError(probeErr) {
+				terminalErr = probeErr
+			}
 			continue
 		}
 		if options.Kind != KindUnknown && receiver.Kind() != options.Kind {
@@ -789,6 +808,9 @@ func Discover(ctx context.Context, options Options) ([]*Receiver, error) {
 			continue
 		}
 		result = append(result, receiver)
+	}
+	if len(result) == 0 && terminalErr != nil {
+		return nil, terminalErr
 	}
 	return result, nil
 }

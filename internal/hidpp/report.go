@@ -3,9 +3,15 @@
 package hidpp
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 )
+
+// ErrNotHIDPPReport classifies raw reports that do not belong to the HID++
+// short/long wire formats. A shared HIDRAW stream may contain ordinary input
+// reports alongside HID++ traffic; those reports must not fail transactions.
+var ErrNotHIDPPReport = errors.New("hidpp: not a HID++ report")
 
 const (
 	// ShortReportID is the HID report ID used by a seven-byte HID++ message.
@@ -85,7 +91,7 @@ func (r Report) CommandByte() byte {
 // would make report boundaries ambiguous.
 func Parse(data []byte) (Report, error) {
 	if len(data) == 0 {
-		return Report{}, fmt.Errorf("hidpp: empty report")
+		return Report{}, fmt.Errorf("%w: empty report", ErrNotHIDPPReport)
 	}
 
 	reportType, expectedLength, parameterLength, err := formatForID(data[0])
@@ -158,7 +164,7 @@ func formatForID(id byte) (ReportType, int, int, error) {
 	case LongReportID:
 		return ReportTypeLong, longReportLength, longParameterLen, nil
 	default:
-		return ReportTypeUnknown, 0, 0, fmt.Errorf("hidpp: unsupported report ID 0x%02x", id)
+		return ReportTypeUnknown, 0, 0, fmt.Errorf("%w: unsupported report ID 0x%02x", ErrNotHIDPPReport, id)
 	}
 }
 

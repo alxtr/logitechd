@@ -185,8 +185,8 @@ func lifecycleResponder(transport *lifecycleTransport, stop <-chan struct{}) {
 
 func respondLifecycleRequest(transport *lifecycleTransport, request hidpp.Report) {
 	if request.DeviceIndex != ReceiverDeviceIndex {
-		if request.SubID == 0 && request.Type == hidpp.ReportTypeShort && request.CommandByte() == hidpp.RootProtocolCommand {
-			transport.respond(hidpp.Report{Type: hidpp.ReportTypeShort, DeviceIndex: request.DeviceIndex, SubID: 0, Function: 1, Parameters: []byte{2, 0, hidpp.RootPingByte}})
+		if request.SubID == 0 && request.Type == hidpp.ReportTypeShort && request.CommandByte() == ((hidpp.RootProtocolCommand&0xf0)|hidpp.ClientSoftwareID) {
+			transport.respond(hidpp.Report{Type: hidpp.ReportTypeShort, DeviceIndex: request.DeviceIndex, SubID: 0, Function: 1, SoftwareID: request.SoftwareID, Parameters: []byte{2, 0, hidpp.RootPingByte}})
 		}
 		return
 	}
@@ -202,17 +202,17 @@ func respondLifecycleRequest(transport *lifecycleTransport, request hidpp.Report
 			}
 			selector := request.Parameters[0]
 			if selector == boltPairInfoBase+1 {
-				transport.respond(hidpp.Report{Type: request.Type, DeviceIndex: ReceiverDeviceIndex, SubID: request.SubID, Function: request.Function, SoftwareID: request.SoftwareID, Parameters: []byte{0, 2, 0x34, 0x12, 0, 0, 0, 0}})
+				transport.respond(hidpp.Report{Type: hidpp.ReportTypeLong, DeviceIndex: ReceiverDeviceIndex, SubID: request.SubID, Function: request.Function, SoftwareID: request.SoftwareID, Parameters: []byte{0, 2, 0x34, 0x12, 0, 0, 0, 0}})
 				return
 			}
 			if selector == boltNameBase+1 {
 				params := make([]byte, 16)
 				params[2] = 10
 				copy(params[3:], "Bolt Mouse")
-				transport.respond(hidpp.Report{Type: request.Type, DeviceIndex: ReceiverDeviceIndex, SubID: request.SubID, Function: request.Function, SoftwareID: request.SoftwareID, Parameters: params})
+				transport.respond(hidpp.Report{Type: hidpp.ReportTypeLong, DeviceIndex: ReceiverDeviceIndex, SubID: request.SubID, Function: request.Function, SoftwareID: request.SoftwareID, Parameters: params})
 				return
 			}
-			transport.respond(hidpp.Report{Type: request.Type, DeviceIndex: ReceiverDeviceIndex, SubID: request.SubID, Function: request.Function, SoftwareID: request.SoftwareID, Parameters: make([]byte, 16)})
+			transport.respond(hidpp.Report{Type: hidpp.ReportTypeLong, DeviceIndex: ReceiverDeviceIndex, SubID: request.SubID, Function: request.Function, SoftwareID: request.SoftwareID, Parameters: make([]byte, 16)})
 		}
 		return
 	}

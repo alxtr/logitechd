@@ -3,8 +3,10 @@ package receiver
 import (
 	"context"
 	"errors"
+	"os"
 	"sort"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/atremb/logitechd/internal/hidpp"
@@ -490,6 +492,13 @@ func (s *ReceiverSession) initialize(child *ChildDevice) {
 	}
 	version, err := child.client.Validate(ctx)
 	if err != nil {
+		if isTransientChildError(err) {
+			child.stateMu.Lock()
+			if child.state != ChildStateRemoved {
+				child.state = ChildStateSleeping
+			}
+			child.stateMu.Unlock()
+		}
 		return
 	}
 	child.stateMu.Lock()
@@ -502,6 +511,13 @@ func (s *ReceiverSession) initialize(child *ChildDevice) {
 	if !removed {
 		s.emit(ChildReady, child)
 	}
+}
+
+func isTransientChildError(err error) bool {
+	return errors.Is(err, hidpp.ErrTimeout) || errors.Is(err, hidpp.ErrClosedTransport) ||
+		errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, os.ErrClosed) || errors.Is(err, syscall.EIO) ||
+		errors.Is(err, syscall.ENODEV) || errors.Is(err, syscall.ENXIO)
 }
 
 func (s *ReceiverSession) setSleeping(child *ChildDevice) {
