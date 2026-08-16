@@ -72,11 +72,14 @@ func TestSmartShiftVersionFallbackAndWireFormats(t *testing.T) {
 	if err != nil || !status.Enabled || !status.TorqueSupported || status.Torque != 70 {
 		t.Fatalf("enhanced status = %+v, error=%v", status, err)
 	}
-	if err := client.SetStatus(context.Background(), true, 30); err != nil {
+	if err := client.SetStatus(context.Background(), true, 100); err != nil {
 		t.Fatal(err)
 	}
-	if got := v2.calls[len(v2.calls)-1]; got.fn != 0x20 || !reflect.DeepEqual(got.params, []byte{0, 30, 70}) {
+	if got := v2.calls[len(v2.calls)-1]; got.fn != 0x20 || !reflect.DeepEqual(got.params, []byte{0, 100, 70}) {
 		t.Fatalf("enhanced set = %+v", got)
+	}
+	if err := client.SetStatus(context.Background(), true, 0); err == nil {
+		t.Fatal("zero threshold was accepted")
 	}
 }
 

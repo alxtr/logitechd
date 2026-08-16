@@ -16,8 +16,8 @@ device:
 dpi: 1600
 smart_shift:
   enabled: true
-  threshold: 25
-  torque: 60
+  threshold: 100
+  torque: 100
 hires_scroll:
   enabled: true
   invert: false
@@ -39,6 +39,9 @@ buttons:
 	}
 	if value.Receiver.Type != ReceiverBolt || value.Device.Index != 2 || value.DPI == nil || *value.DPI != 1600 {
 		t.Fatalf("decoded config = %+v", value)
+	}
+	if value.SmartShift == nil || value.SmartShift.Threshold == nil || *value.SmartShift.Threshold != 100 || value.SmartShift.Torque == nil || *value.SmartShift.Torque != 100 {
+		t.Fatalf("decoded smart shift = %+v", value.SmartShift)
 	}
 	if len(value.Buttons) != 2 || value.Buttons[CID(0x00c3)].Value != "KEY_LEFTMETA" {
 		t.Fatalf("decoded buttons = %+v", value.Buttons)
@@ -70,16 +73,17 @@ func TestLoadRejectsUnknownFieldsAndMultipleDocuments(t *testing.T) {
 
 func TestLoadRejectsBadCIDsRangesReceiverAndActions(t *testing.T) {
 	tests := map[string]string{
-		"CID spelling":  "buttons:\n  83:\n    action: back\n",
-		"CID width":     "buttons:\n  0x10000:\n    action: back\n",
-		"receiver":      "receiver:\n  type: bluetooth\n",
-		"index":         "device:\n  index: 7\n",
-		"dpi":           "dpi: 99\n",
-		"threshold":     "smart_shift:\n  threshold: 51\n",
-		"torque":        "smart_shift:\n  torque: 101\n",
-		"target":        "hires_scroll:\n  target: nowhere\n",
-		"action":        "buttons:\n  0x0053:\n    action: launch-moon\n",
-		"missing value": "buttons:\n  0x0053:\n    action: key\n",
+		"CID spelling":   "buttons:\n  83:\n    action: back\n",
+		"CID width":      "buttons:\n  0x10000:\n    action: back\n",
+		"receiver":       "receiver:\n  type: bluetooth\n",
+		"index":          "device:\n  index: 7\n",
+		"dpi":            "dpi: 99\n",
+		"threshold zero": "smart_shift:\n  threshold: 0\n",
+		"threshold byte": "smart_shift:\n  threshold: 256\n",
+		"torque":         "smart_shift:\n  torque: 101\n",
+		"target":         "hires_scroll:\n  target: nowhere\n",
+		"action":         "buttons:\n  0x0053:\n    action: launch-moon\n",
+		"missing value":  "buttons:\n  0x0053:\n    action: key\n",
 	}
 	for name, data := range tests {
 		t.Run(name, func(t *testing.T) {

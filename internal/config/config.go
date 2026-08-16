@@ -50,8 +50,8 @@ type DeviceConfig struct {
 }
 
 // SmartShiftConfig contains the optional wheel ratchet settings. Threshold is
-// in the device's 1..50 scale and torque is in the enhanced feature's 1..100
-// scale.
+// in the device's 1..255 byte scale and torque is in the enhanced feature's
+// 1..100 scale.
 type SmartShiftConfig struct {
 	Enabled   *bool `yaml:"enabled"`
 	Threshold *int  `yaml:"threshold"`
@@ -247,8 +247,8 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("%w: dpi %d is outside %d..%d", ErrInvalidConfig, *c.DPI, MinDPI, MaxDPI)
 	}
 	if c.SmartShift != nil {
-		if c.SmartShift.Threshold != nil && (*c.SmartShift.Threshold < 1 || *c.SmartShift.Threshold > 50) {
-			return fmt.Errorf("%w: smart_shift.threshold %d is outside 1..50", ErrInvalidConfig, *c.SmartShift.Threshold)
+		if c.SmartShift.Threshold != nil && (*c.SmartShift.Threshold < 1 || *c.SmartShift.Threshold > 255) {
+			return fmt.Errorf("%w: smart_shift.threshold %d is outside 1..255", ErrInvalidConfig, *c.SmartShift.Threshold)
 		}
 		if c.SmartShift.Torque != nil && (*c.SmartShift.Torque < 1 || *c.SmartShift.Torque > 100) {
 			return fmt.Errorf("%w: smart_shift.torque %d is outside 1..100", ErrInvalidConfig, *c.SmartShift.Torque)

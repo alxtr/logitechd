@@ -83,9 +83,9 @@ func call(ctx context.Context, device FeatureDevice, info hidpp.FeatureInfo, fun
 	return device.Call(ctx, info.Index, function, params)
 }
 
-// SmartShiftStatus is the current wheel mode. Threshold is the speed at
-// which the wheel changes mode; Torque is only meaningful on the enhanced
-// feature variant.
+// SmartShiftStatus is the current wheel mode. Threshold is the device's
+// 1..255 byte value for the speed at which the wheel changes mode; Torque is
+// only meaningful on the enhanced feature variant.
 type SmartShiftStatus struct {
 	Enabled         bool
 	Mode            byte
@@ -171,18 +171,18 @@ func (s *SmartShift) GetStatus(ctx context.Context) (SmartShiftStatus, error) {
 	return status, nil
 }
 
-func validThreshold(value byte) bool { return value >= 1 && value <= 50 }
+func validThreshold(value byte) bool { return value >= 1 && value <= 255 }
 func validTorque(value byte) bool    { return value >= 1 && value <= 100 }
 
-// SetStatus changes the enabled state and threshold while preserving torque
-// on enhanced devices. The mode values are the HID++ values: zero selects
-// speed-dependent switching and one selects free-spin.
+// SetStatus changes the enabled state and 1..255 threshold while preserving
+// torque on enhanced devices. The mode values are the HID++ values: zero
+// selects speed-dependent switching and one selects free-spin.
 func (s *SmartShift) SetStatus(ctx context.Context, enabled bool, threshold byte) error {
 	if s == nil {
 		return errors.New("mxmaster: nil smart shift client")
 	}
 	if !validThreshold(threshold) {
-		return fmt.Errorf("mxmaster: smart shift threshold %d is outside 1..50", threshold)
+		return fmt.Errorf("mxmaster: smart shift threshold %d is outside 1..255", threshold)
 	}
 	mode := byte(1)
 	if enabled {
