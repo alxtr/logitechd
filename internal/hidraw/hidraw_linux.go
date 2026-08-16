@@ -266,13 +266,13 @@ func writeAll(data []byte, write func([]byte) (int, error)) (int, error) {
 		if errors.Is(err, syscall.EINTR) {
 			continue
 		}
+		if err != nil {
+			return written, err
+		}
 		if n < 0 || n > len(data)-written {
 			return written, fmt.Errorf("hidraw: invalid write count %d", n)
 		}
 		written += n
-		if err != nil {
-			return written, err
-		}
 		if n == 0 {
 			return written, io.ErrShortWrite
 		}

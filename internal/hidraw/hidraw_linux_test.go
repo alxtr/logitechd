@@ -49,6 +49,18 @@ func TestWriteAllReturnsEPIPE(t *testing.T) {
 	}
 }
 
+func TestWriteAllPreservesSyscallErrorWithNegativeCount(t *testing.T) {
+	got, err := writeAll([]byte("abc"), func([]byte) (int, error) {
+		return -1, syscall.EINVAL
+	})
+	if !errors.Is(err, syscall.EINVAL) {
+		t.Fatalf("writeAll error = %v, want EINVAL", err)
+	}
+	if got != 0 {
+		t.Fatalf("writeAll wrote %d bytes, want 0", got)
+	}
+}
+
 func TestWriteAllRejectsInvalidWriterResults(t *testing.T) {
 	for name, write := range map[string]func([]byte) (int, error){
 		"negative":  func([]byte) (int, error) { return -1, nil },
