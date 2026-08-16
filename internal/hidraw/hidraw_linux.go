@@ -20,14 +20,17 @@ const maxDescriptorSize = 4096
 
 // Device is an opened HIDRAW character device.
 //
-// Operations are serialized so that a close cannot race an ioctl or a write.
+// Access to the file handle is synchronized, and Close is allowed to run
+// concurrently with ReadReport so a blocked read can be interrupted. A
 // ReadReport reads one kernel HIDRAW report into the supplied buffer; callers
 // should size it according to the device's report descriptor.
 type Device struct {
-	mu     sync.Mutex
-	file   *os.File
-	path   string
-	closed bool
+	mu      sync.Mutex
+	readMu  sync.Mutex
+	writeMu sync.Mutex
+	file    *os.File
+	path    string
+	closed  bool
 }
 
 // Open opens path for bidirectional HIDRAW access.
@@ -73,12 +76,14 @@ func (d *Device) Close() error {
 	}
 
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	if d.closed {
+		d.mu.Unlock()
 		return nil
 	}
 	d.closed = true
-	return d.file.Close()
+	file := d.file
+	d.mu.Unlock()
+	return file.Close()
 }
 
 // ReadReport reads one report into dst. A short read is returned as-is because
@@ -89,19 +94,20 @@ func (d *Device) ReadReport(dst []byte) (int, error) {
 		return 0, errors.New("hidraw: empty read buffer")
 	}
 
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if err := d.checkOpenLocked(); err != nil {
+	file, path, err := d.openFile()
+	if err != nil {
 		return 0, err
 	}
+	d.readMu.Lock()
+	defer d.readMu.Unlock()
 
 	for {
-		n, err := d.file.Read(dst)
+		n, err := file.Read(dst)
 		if errors.Is(err, syscall.EINTR) {
 			continue
 		}
 		if err != nil {
-			return n, fmt.Errorf("hidraw: read %q: %w", d.path, err)
+			return n, fmt.Errorf("hidraw: read %q: %w", path, err)
 		}
 		return n, nil
 	}
@@ -114,16 +120,26 @@ func (d *Device) WriteReport(report []byte) error {
 		return errors.New("hidraw: empty report")
 	}
 
+	file, path, err := d.openFile()
+	if err != nil {
+		return err
+	}
+	d.writeMu.Lock()
+	defer d.writeMu.Unlock()
+
+	if _, err := writeAll(report, file.Write); err != nil {
+		return fmt.Errorf("hidraw: write %q: %w", path, err)
+	}
+	return nil
+}
+
+func (d *Device) openFile() (*os.File, string, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if err := d.checkOpenLocked(); err != nil {
-		return err
+		return nil, "", err
 	}
-
-	if _, err := writeAll(report, d.file.Write); err != nil {
-		return fmt.Errorf("hidraw: write %q: %w", d.path, err)
-	}
-	return nil
+	return d.file, d.path, nil
 }
 
 func (d *Device) checkOpenLocked() error {
