@@ -15,7 +15,10 @@ import (
 	"github.com/atremb/logitechd/internal/receiver"
 )
 
-var version = "dev"
+var (
+	version = "dev"
+	commit  = "unknown"
+)
 
 const defaultConfigPath = "/etc/logitechd/config.yaml"
 
@@ -33,7 +36,7 @@ func main() {
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Printf("logitechd %s\n", version)
+		fmt.Printf("logitechd %s (commit %s)\n", version, commit)
 		return
 	}
 
@@ -57,6 +60,8 @@ func main() {
 		log.Printf("configuration is valid; hardware was not opened")
 		return
 	}
+
+	log.Printf("starting logitechd: version=%s commit=%s", version, commit)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

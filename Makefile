@@ -4,6 +4,9 @@ GO ?= go
 BINARY ?= logitechd
 CONFIG ?= example.yaml
 CMD ?= ./cmd/logitechd
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || printf 'dev')
+COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null || printf 'unknown')
+LDFLAGS ?= -X main.version=$(VERSION) -X main.commit=$(COMMIT)
 
 PREFIX ?= /usr/local
 BINDIR ?= $(PREFIX)/bin
@@ -19,7 +22,7 @@ SERVICE_GROUP ?= logitechd
 all: build
 
 build:
-	$(GO) build -o $(BINARY) $(CMD)
+	$(GO) build -ldflags "$(LDFLAGS)" -o $(BINARY) $(CMD)
 
 test:
 	$(GO) test -race ./...
