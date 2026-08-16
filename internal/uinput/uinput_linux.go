@@ -353,11 +353,18 @@ func (d *Device) setRelBit(code uint16) error {
 }
 
 func ioctlInt(fd int, request uintptr, value int) error {
-	return ioctl(fd, request, unsafe.Pointer(&value))
+	return invokeIoctl(fd, request, uintptr(value))
 }
 
 func ioctl(fd int, request uintptr, argument unsafe.Pointer) error {
-	_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(fd), request, uintptr(argument))
+	return invokeIoctl(fd, request, uintptr(argument))
+}
+
+// invokeIoctl is a seam for testing ioctl argument semantics without a uinput
+// device. Scalar uinput capability ioctls use the argument value directly,
+// while struct ioctls pass the address of the struct.
+var invokeIoctl = func(fd int, request uintptr, argument uintptr) error {
+	_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(fd), request, argument)
 	if errno != 0 {
 		return errno
 	}
