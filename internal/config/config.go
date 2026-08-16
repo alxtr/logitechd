@@ -59,8 +59,7 @@ type SmartShiftConfig struct {
 }
 
 // HiResScrollConfig controls high-resolution wheel reporting. Target is the
-// destination for decoded wheel events; this phase accepts the names without
-// implementing the eventual input sink.
+// destination for decoded wheel events.
 type HiResScrollConfig struct {
 	Enabled *bool  `yaml:"enabled"`
 	Invert  *bool  `yaml:"invert"`
@@ -73,13 +72,29 @@ type ThumbWheelConfig struct {
 	Invert *bool `yaml:"invert"`
 }
 
-// ActionSpec is a declarative button action. Execution is intentionally left
-// to the next phase. The action field is one of the names accepted by
-// Validate; Value is used by actions that need an argument.
+// ActionSpec is a declarative button or gesture action. The action field is one
+// of the names accepted by Validate; Value is used by actions that need an
+// argument.
 type ActionSpec struct {
 	Action string `yaml:"action"`
 	Value  string `yaml:"value"`
 }
+
+// GestureConfig describes actions held while a diverted raw-XY gesture is
+// moving in one of the four cardinal directions. An omitted action means that
+// direction is ignored. Threshold is measured in accumulated device movement
+// units and defaults to a conservative value when omitted.
+type GestureConfig struct {
+	Threshold int        `yaml:"threshold"`
+	Left      ActionSpec `yaml:"left"`
+	Right     ActionSpec `yaml:"right"`
+	Up        ActionSpec `yaml:"up"`
+	Down      ActionSpec `yaml:"down"`
+}
+
+// RawXYConfig is an explicit name for GestureConfig used by callers that keep
+// the HID++ event name in their configuration model.
+type RawXYConfig = GestureConfig
 
 // UnmarshalYAML also permits the compact form `0x0053: back`. Both forms are
 // part of this configuration language; mapping fields remain explicitly
@@ -144,7 +159,7 @@ func (c *CID) UnmarshalYAML(node *yaml.Node) error {
 	return nil
 }
 
-// Config is the complete Phase 5 configuration.
+// Config is the complete configuration.
 type Config struct {
 	Receiver    ReceiverConfig     `yaml:"receiver"`
 	Device      DeviceConfig       `yaml:"device"`
@@ -153,6 +168,8 @@ type Config struct {
 	HiResScroll *HiResScrollConfig `yaml:"hires_scroll"`
 	ThumbWheel  *ThumbWheelConfig  `yaml:"thumb_wheel"`
 	Buttons     map[CID]ActionSpec `yaml:"buttons"`
+	Gestures    *GestureConfig     `yaml:"gestures"`
+	RawXY       *RawXYConfig       `yaml:"raw_xy"`
 }
 
 // LoadFile reads and validates one YAML document.
@@ -252,29 +269,52 @@ func (c *Config) Validate() error {
 			return err
 		}
 	}
+	for name, gestures := range map[string]*GestureConfig{"gestures": c.Gestures, "raw_xy": c.RawXY} {
+		if gestures == nil {
+			continue
+		}
+		if gestures.Threshold < 0 || gestures.Threshold > 32767 {
+			return fmt.Errorf("%w: %s.threshold %d is outside 0..32767", ErrInvalidConfig, name, gestures.Threshold)
+		}
+		for direction, action := range map[string]ActionSpec{
+			"left": gestures.Left, "right": gestures.Right,
+			"up": gestures.Up, "down": gestures.Down,
+		} {
+			if action.Action == "" {
+				continue
+			}
+			if err := validateActionName(name+"."+direction, action); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
 }
 
 func validateAction(cid CID, action ActionSpec) error {
+	return validateActionName("buttons."+cid.String(), action)
+}
+
+func validateActionName(location string, action ActionSpec) error {
 	name := strings.ToLower(strings.TrimSpace(action.Action))
 	switch name {
 	case "none", "back", "forward", "middle", "copy", "paste":
 		if action.Value != "" {
-			return fmt.Errorf("%w: buttons.%s action %q does not accept value", ErrInvalidConfig, cid, name)
+			return fmt.Errorf("%w: %s action %q does not accept value", ErrInvalidConfig, location, name)
 		}
-	case "key", "button", "command", "scroll":
+	case "key", "button", "command", "scroll", "axis", "relative":
 		if strings.TrimSpace(action.Value) == "" {
-			return fmt.Errorf("%w: buttons.%s action %q requires value", ErrInvalidConfig, cid, name)
+			return fmt.Errorf("%w: %s action %q requires value", ErrInvalidConfig, location, name)
 		}
 		if name == "scroll" {
 			switch strings.ToLower(action.Value) {
 			case "up", "down", "left", "right":
 			default:
-				return fmt.Errorf("%w: buttons.%s scroll value %q is invalid", ErrInvalidConfig, cid, action.Value)
+				return fmt.Errorf("%w: %s scroll value %q is invalid", ErrInvalidConfig, location, action.Value)
 			}
 		}
 	default:
-		return fmt.Errorf("%w: buttons.%s action %q is invalid", ErrInvalidConfig, cid, action.Action)
+		return fmt.Errorf("%w: %s action %q is invalid", ErrInvalidConfig, location, action.Action)
 	}
 	return nil
 }

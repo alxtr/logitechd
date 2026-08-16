@@ -745,6 +745,10 @@ func DecodeControlButtonEvent(report hidpp.Report) (ControlButtonEvent, error) {
 type RawXYEvent struct {
 	DX int16
 	DY int16
+	// Release is an optional local lifecycle marker. HID++ raw-XY reports do
+	// not carry a separate gesture-up bit, so callers may set it when a
+	// diversion or child session ends.
+	Release bool
 }
 
 func DecodeRawXYEvent(report hidpp.Report) (RawXYEvent, error) {

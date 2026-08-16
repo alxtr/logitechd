@@ -109,3 +109,42 @@ func TestLoadAcceptsCompactNamedButtonAction(t *testing.T) {
 		t.Fatalf("compact action = %+v", value.Buttons)
 	}
 }
+
+func TestLoadValidatesPhaseSixActionsAndGestures(t *testing.T) {
+	value, err := Load([]byte(`
+hires_scroll:
+  enabled: true
+  target: uinput
+gestures:
+  threshold: 12
+  left:
+    action: key
+    value: KEY_LEFTCTRL+KEY_A
+  right:
+    action: button
+    value: BTN_RIGHT
+  down:
+    action: axis
+    value: REL_Y:4
+buttons:
+  0x0053:
+    action: relative
+    value: REL_X:-2
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value.Gestures == nil || value.Gestures.Threshold != 12 || value.HiResScroll.Target != "uinput" {
+		t.Fatalf("phase six configuration = %+v", value)
+	}
+
+	for _, data := range []string{
+		"gestures:\n  threshold: 32768\n",
+		"gestures:\n  left:\n    action: key\n",
+		"buttons:\n  0x0053:\n    action: axis\n",
+	} {
+		if _, err := Load([]byte(data)); err == nil || !errors.Is(err, ErrInvalidConfig) {
+			t.Fatalf("Load(%q) error = %v, want invalid config", data, err)
+		}
+	}
+}

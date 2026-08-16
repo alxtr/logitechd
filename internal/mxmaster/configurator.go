@@ -179,6 +179,24 @@ func (c *Configurator) Events() <-chan InputEvent {
 	return c.events
 }
 
+// StartActions attaches a serialized Phase 6 action handler to this
+// configurator's decoded event stream. The caller owns the returned handler's
+// lifecycle and must stop it before closing the underlying output.
+func (c *Configurator) StartActions(ctx context.Context, output Output) (*ActionHandler, error) {
+	if c == nil {
+		return nil, errors.New("mxmaster: nil configurator")
+	}
+	handler, err := NewActionHandler(c.settings, output)
+	if err != nil {
+		return nil, err
+	}
+	if err := handler.Start(ctx, c.Events()); err != nil {
+		_ = handler.Close()
+		return nil, err
+	}
+	return handler, nil
+}
+
 func (c *Configurator) route(report hidpp.Report) {
 	if c == nil || c.features == nil {
 		return
@@ -360,7 +378,7 @@ func (c *Configurator) applyButtons(ctx context.Context) error {
 		return fmt.Errorf("%w: reprogrammable controls", ErrNoFeature)
 	}
 	for cid, action := range c.settings.Buttons {
-		diverted := !strings.EqualFold(action.Action, "none")
+		diverted := !strings.EqualFold(strings.TrimSpace(action.Action), "none")
 		if _, err := c.features.Controls.SetTemporaryDiversion(ctx, uint16(cid), diverted); err != nil {
 			return fmt.Errorf("mxmaster: configure button %s: %w", cid, err)
 		}
