@@ -22,6 +22,8 @@ import (
 
 const defaultRetryInterval = 2 * time.Second
 
+var errSystemResume = errors.New("system resumed")
+
 // Logger is intentionally the small Printf surface used by the standard
 // logger. It keeps orchestration tests independent of process logging.
 type Logger interface {
@@ -74,8 +76,11 @@ type Options struct {
 	SessionFactory SessionFactory
 	Configurator   ConfiguratorFactory
 	OutputFactory  OutputFactory
-	RetryInterval  time.Duration
-	Logger         Logger
+	// ResumeEvents requests a fresh receiver session after the host resumes.
+	// A nil or closed channel disables host-resume handling.
+	ResumeEvents  <-chan struct{}
+	RetryInterval time.Duration
+	Logger        Logger
 }
 
 // Daemon is a single-run process lifecycle. Run blocks until the context is
@@ -138,10 +143,12 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 
 	events := make(chan lifecycleSignal, 256)
+	resumeEvents := d.options.ResumeEvents
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil
 		}
+		resumeEvents = drainEvents(resumeEvents)
 
 		token := &connectionToken{}
 		lifecycle := receiver.LifecycleOptions{
@@ -173,7 +180,13 @@ func (d *Daemon) Run(ctx context.Context) error {
 		}
 
 		d.logSessionStarted(session)
-		err = d.runSession(ctx, session, token, events)
+		err = d.runSession(ctx, session, token, events, resumeEvents)
+		if errors.Is(err, errSystemResume) {
+			if ctx.Err() != nil {
+				return nil
+			}
+			continue
+		}
 		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 			return err
 		}
@@ -214,7 +227,7 @@ type deferredTarget struct {
 	child *receiver.ChildDevice
 }
 
-func (d *Daemon) runSession(ctx context.Context, session Session, token *connectionToken, events <-chan lifecycleSignal) error {
+func (d *Daemon) runSession(ctx context.Context, session Session, token *connectionToken, events <-chan lifecycleSignal, resumeEvents <-chan struct{}) error {
 	var active *activeTarget
 	var retryChild *receiver.ChildDevice
 	var retryTimer *time.Timer
@@ -258,6 +271,13 @@ func (d *Daemon) runSession(ctx context.Context, session Session, token *connect
 				d.logger.Printf("receiver transport lost; reconnecting: %v", safeError(err))
 			}
 			return nil
+		case _, ok := <-resumeEvents:
+			if !ok {
+				resumeEvents = nil
+				continue
+			}
+			d.logger.Printf("system resumed; reconnecting receiver")
+			return errSystemResume
 		case err := <-actionErrors:
 			if err == nil {
 				continue
@@ -481,6 +501,20 @@ func wait(ctx context.Context, duration time.Duration) bool {
 	case <-timer.C:
 		return true
 	}
+}
+
+func drainEvents(events <-chan struct{}) <-chan struct{} {
+	for events != nil {
+		select {
+		case _, ok := <-events:
+			if !ok {
+				return nil
+			}
+		default:
+			return events
+		}
+	}
+	return nil
 }
 
 func isRetryableReceiverError(err error) bool {

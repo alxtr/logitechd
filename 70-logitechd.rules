@@ -1,0 +1,2 @@
+ACTION=="add", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", GROUP="input", MODE="0660"
+ACTION=="add", SUBSYSTEM=="misc", KERNEL=="uinput", GROUP="input", MODE="0660"

@@ -14,7 +14,9 @@ RestartSec=3s
 
 # Access is intentionally limited to the two device classes required by the
 # daemon. Filesystem permissions still need to grant the service account access.
-DeviceAllow=/dev/hidraw* rw
+# DeviceAllow does not support globbing in /dev paths; allow the hidraw
+# character-device group so all current and future /dev/hidraw* nodes work.
+DeviceAllow=char-hidraw rw
 DeviceAllow=/dev/uinput rw
 NoNewPrivileges=yes
 CapabilityBoundingSet=

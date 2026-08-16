@@ -11,6 +11,7 @@ import (
 
 	"github.com/atremb/logitechd/internal/config"
 	"github.com/atremb/logitechd/internal/daemon"
+	"github.com/atremb/logitechd/internal/power"
 	"github.com/atremb/logitechd/internal/receiver"
 )
 
@@ -59,12 +60,17 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	resumeEvents, err := power.WatchResumes(ctx)
+	if err != nil {
+		log.Printf("host resume monitoring temporarily unavailable; retrying: %v", err)
+	}
 	run, err := daemon.New(settings, daemon.Options{
 		Receiver: receiver.Options{
 			Path: settings.Receiver.Path,
 			Kind: receiverKind(settings.Receiver.Type),
 		},
-		Logger: log.Default(),
+		ResumeEvents: resumeEvents,
+		Logger:       log.Default(),
 	})
 	if err != nil {
 		log.Printf("configuration error: %v", err)

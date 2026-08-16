@@ -150,12 +150,12 @@ func validSettings() config.Config {
 	}
 }
 
-func newTestDaemon(t *testing.T, settings config.Config, offers chan<- sessionOffer, configure func() *fakeConfigurator) (*Daemon, context.CancelFunc, <-chan error, *fakeOutput) {
+func newTestDaemon(t *testing.T, settings config.Config, offers chan<- sessionOffer, configure func() *fakeConfigurator, optionOverrides ...func(*Options)) (*Daemon, context.CancelFunc, <-chan error, *fakeOutput) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	factoryErrors := make(chan error, 1)
 	output := &fakeOutput{}
-	run, err := New(settings, Options{
+	options := Options{
 		Receiver: receiver.Options{Kind: receiver.KindBolt},
 		SessionFactory: func(_ context.Context, options receiver.LifecycleOptions) (Session, error) {
 			session := newFakeSession()
@@ -170,7 +170,11 @@ func newTestDaemon(t *testing.T, settings config.Config, offers chan<- sessionOf
 		OutputFactory: func() (mxmaster.Output, error) { return output, nil },
 		RetryInterval: time.Millisecond,
 		Logger:        quietLogger{},
-	})
+	}
+	for _, override := range optionOverrides {
+		override(&options)
+	}
+	run, err := New(settings, options)
 	if err != nil {
 		cancel()
 		t.Fatal(err)
@@ -301,6 +305,71 @@ func TestDaemonReconnectsAfterReceiverLoss(t *testing.T) {
 	}
 	if firstConfig.action == nil || firstConfig.action.stop != 1 || secondConfig.action == nil || secondConfig.action.stop != 1 {
 		t.Fatalf("reconnect cleanup = first=%+v second=%+v", firstConfig.action, secondConfig.action)
+	}
+}
+
+func TestDaemonReconnectsAndReappliesConfigurationAfterResume(t *testing.T) {
+	resumes := make(chan struct{}, 1)
+	offers := make(chan sessionOffer, 2)
+	created := make(chan *fakeConfigurator, 2)
+	_, cancel, results, _ := newTestDaemon(t, validSettings(), offers, func() *fakeConfigurator {
+		configurator := &fakeConfigurator{}
+		created <- configurator
+		return configurator
+	}, func(options *Options) {
+		options.ResumeEvents = resumes
+	})
+
+	firstOffer := <-offers
+	target := receiver.ChildMetadata{WirelessIndex: 2, Name: "MX Master 3S"}
+	firstOffer.onEvent(receiver.ChildEvent{Type: receiver.ChildReady, Metadata: target})
+	firstConfig := <-created
+
+	resumes <- struct{}{}
+	secondOffer := <-offers
+	waitFor(t, firstConfig.actionStopped)
+	secondOffer.onEvent(receiver.ChildEvent{Type: receiver.ChildReady, Metadata: target})
+	secondConfig := <-created
+
+	cancel()
+	if err := <-results; err != nil {
+		t.Fatal(err)
+	}
+	if firstConfig.apply != 1 || secondConfig.apply != 1 {
+		t.Fatalf("configuration apply count = first=%d second=%d, want 1/1", firstConfig.apply, secondConfig.apply)
+	}
+}
+
+func TestDaemonDiscardsStaleResumeBeforeOpeningFreshSession(t *testing.T) {
+	resumes := make(chan struct{}, 1)
+	resumes <- struct{}{}
+	offers := make(chan sessionOffer, 2)
+	created := make(chan *fakeConfigurator, 1)
+	_, cancel, results, _ := newTestDaemon(t, validSettings(), offers, func() *fakeConfigurator {
+		configurator := &fakeConfigurator{}
+		created <- configurator
+		return configurator
+	}, func(options *Options) {
+		options.ResumeEvents = resumes
+	})
+
+	firstOffer := <-offers
+	select {
+	case <-offers:
+		cancel()
+		<-results
+		t.Fatal("stale resume event recycled a freshly opened receiver session")
+	case <-time.After(20 * time.Millisecond):
+	}
+	firstOffer.onEvent(receiver.ChildEvent{
+		Type:     receiver.ChildReady,
+		Metadata: receiver.ChildMetadata{WirelessIndex: 2, Name: "MX Master 3S"},
+	})
+	<-created
+
+	cancel()
+	if err := <-results; err != nil {
+		t.Fatal(err)
 	}
 }
 

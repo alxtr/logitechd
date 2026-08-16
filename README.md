@@ -24,6 +24,7 @@ not currently implemented.
 
 * Automatic Bolt/Unifying receiver discovery
 * Receiver and wireless-device reconnect handling
+* Automatic configuration recovery after host suspend/resume
 * MX Master 3S SmartShift configuration
 * Hi-res scrolling and thumb-wheel configuration
 * DPI configuration
@@ -40,23 +41,23 @@ not currently implemented.
 * Read/write access to `/dev/uinput`
 
 The daemon needs elevated device permissions, but it does not require a GUI or
-D-Bus session.
+D-Bus session. When available, it uses systemd-logind on the system D-Bus to
+detect host resume and reapply volatile mouse configuration.
 
-## Quick start
+## Installation
 
-Clone and build the daemon:
+The minimal systemd installation builds the daemon, creates its locked service
+account, installs the configuration and service, and applies the included udev
+rules:
 
 ```sh
 git clone https://github.com/atremb/logitechd.git
 cd logitechd
-go build -o logitechd ./cmd/logitechd
-```
-
-Copy and edit the example configuration:
-
-```sh
 cp example.yaml config.yaml
 $EDITOR config.yaml
+sudo make install CONFIG=./config.yaml
+sudo systemctl daemon-reload
+sudo systemctl enable --now logitechd.service
 ```
 
 The example targets an MX Master 3S named `MX Master 3S` in receiver slot `2`.
@@ -67,10 +68,23 @@ receiver:
   type: unifying
 ```
 
-Validate the configuration without opening hardware:
+`make install` preserves an existing `/etc/logitechd/config.yaml`. After the
+first installation, edit that file to change the service configuration.
+
+Check the service with:
 
 ```sh
-./logitechd -config ./config.yaml -validate
+sudo systemctl status logitechd.service
+sudo journalctl -u logitechd.service -f
+```
+
+## Build and run manually
+
+Build and validate a configuration without opening hardware:
+
+```sh
+make build
+make validate CONFIG=./config.yaml
 ```
 
 Run manually as root for an initial hardware test:
@@ -109,55 +123,39 @@ receiver:
 
 See [`example.yaml`](example.yaml) for button, wheel, DPI, and gesture examples.
 
-## Device permissions
+## Permission troubleshooting
 
-The supplied service runs as the `logitechd` user with the `input` group. Create
-the service account before installing the unit:
+The standard installation creates the service account and installs a udev rule
+that grants the service access to Logitech HIDRAW devices and `uinput`. No
+manual permission changes should normally be needed.
 
-```sh
-sudo useradd --system --user-group --no-create-home --shell /usr/sbin/nologin logitechd
-sudo usermod --append --groups input logitechd
-```
-
-Check the device permissions on your system:
+If the service reports `permission denied`, inspect the device permissions:
 
 ```sh
 ls -l /dev/hidraw* /dev/uinput
 ```
 
-If your distribution does not already grant the `input` group access, create a
-udev rule such as `/etc/udev/rules.d/70-logitechd.rules`:
+Reinstall and reapply the supplied rule, then restart the service:
+
+```sh
+sudo make install-udev
+sudo systemctl restart logitechd.service
+```
+
+The rules are limited to new Logitech HIDRAW devices and the `uinput` device.
+They use normal group permissions without running external commands or adding
+package-specific ACL entries, allowing other access rules to coexist:
 
 ```udev
-KERNEL=="hidraw*", ATTRS{idVendor}=="046d", GROUP="input", MODE="0660"
-KERNEL=="uinput", GROUP="input", MODE="0660"
+ACTION=="add", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", GROUP="input", MODE="0660"
+ACTION=="add", SUBSYSTEM=="misc", KERNEL=="uinput", GROUP="input", MODE="0660"
 ```
 
-Reload the rules and reconnect the receiver:
+When running the daemon manually as a non-root user, add that user to the
+`input` group, then log out and back in:
 
 ```sh
-sudo udevadm control --reload-rules
-sudo udevadm trigger
-```
-
-## systemd installation
-
-Build and install the binary, configuration, and service:
-
-```sh
-sudo install -Dm755 logitechd /usr/local/bin/logitechd
-sudo install -d -o root -g logitechd -m 0750 /etc/logitechd
-sudo install -o root -g logitechd -m 0640 config.yaml /etc/logitechd/config.yaml
-sudo install -Dm644 logitechd.service /usr/lib/systemd/system/logitechd.service
-```
-
-Enable and inspect the new service:
-
-```sh
-sudo systemctl daemon-reload
-sudo systemctl enable --now logitechd.service
-sudo systemctl status logitechd.service
-sudo journalctl -u logitechd.service -f
+sudo usermod --append --groups input "$USER"
 ```
 
 ## Troubleshooting
@@ -168,20 +166,16 @@ Confirm that the receiver is visible to USB:
 lsusb | grep -i logitech
 ```
 
-A Bolt receiver commonly appears as USB ID `046d:c548`. If the daemon reports
-permission errors, inspect the ownership of `/dev/hidraw*` and `/dev/uinput`,
-then reload the udev rules. If the device is not selected, verify its exact
-HID++ name and wireless slot in the YAML configuration.
+A Bolt receiver commonly appears as USB ID `046d:c548`. If the device is not
+selected, verify its exact HID++ name and wireless slot in the YAML
+configuration.
 
 ## Development
 
 Run the complete hardware-free verification suite:
 
 ```sh
-go test ./...
-go test -race ./...
-go vet ./...
-go build ./...
+make check
 ```
 
 Linux HIDRAW, HID++, and `uinput` integration is isolated from the MX Master-specific feature
