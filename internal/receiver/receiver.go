@@ -852,10 +852,34 @@ func OpenAndEnumerate(ctx context.Context, options Options) (Snapshot, error) {
 }
 
 func systemOpener(options hidpp.SessionOptions) Opener {
+	return systemOpenerWithDevice(func(path string) (systemDevice, error) {
+		return hidraw.Open(path)
+	}, options)
+}
+
+// systemDevice is the part of hidraw.Device needed before creating a HID++
+// session. The report descriptor is checked before the session can write any
+// protocol probes.
+type systemDevice interface {
+	hidpp.Transport
+	GetRawInfo() (hidraw.RawInfo, error)
+	GetReportDescriptor() ([]byte, error)
+}
+
+func systemOpenerWithDevice(open func(string) (systemDevice, error), options hidpp.SessionOptions) Opener {
 	return func(path string) (Opened, error) {
-		device, err := hidraw.Open(path)
+		device, err := open(path)
 		if err != nil {
 			return Opened{}, err
+		}
+		descriptor, err := device.GetReportDescriptor()
+		if err != nil {
+			_ = device.Close()
+			return Opened{}, fmt.Errorf("receiver: read report descriptor %q: %w", path, err)
+		}
+		if _, err := hidpp.RecognizeDescriptor(descriptor); err != nil {
+			_ = device.Close()
+			return Opened{}, fmt.Errorf("receiver: %q has no recognized HID++ report: %w", path, err)
 		}
 		metadata := DeviceMetadata{Path: path}
 		if rawInfo, infoErr := device.GetRawInfo(); infoErr == nil {

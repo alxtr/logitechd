@@ -4,11 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/atremb/logitechd/internal/hidpp"
+	"github.com/atremb/logitechd/internal/hidraw"
 )
 
 type registerKey struct {
@@ -279,6 +283,106 @@ func TestDiscoverAndOpenAndEnumerateUseInjectedScannerAndClose(t *testing.T) {
 	if openedPath != "/dev/hidraw9" || closeCount != 1 || snapshot.Kind != KindUnifying || len(snapshot.Devices) != 1 {
 		t.Fatalf("path=%q closes=%d snapshot=%+v", openedPath, closeCount, snapshot)
 	}
+}
+
+func TestSystemOpenerFiltersReportDescriptorsBeforeProtocolWrites(t *testing.T) {
+	nonHIDPP := newDescriptorSystemDevice([]byte{
+		0x75, 0x08, // Report Size 8
+		0x95, 0x01, // Report Count 1
+		0x81, 0x02, // Input
+	})
+	recognized := newDescriptorSystemDevice([]byte{
+		0x85, 0x10, // Report ID
+		0x75, 0x08, // Report Size 8
+		0x95, 0x06, // HID++ short payload
+		0x81, 0x02, // Input
+	})
+	devices := map[string]*descriptorSystemDevice{
+		"/dev/hidraw0": nonHIDPP,
+		"/dev/hidraw2": recognized,
+	}
+	opener := systemOpenerWithDevice(func(path string) (systemDevice, error) {
+		return devices[path], nil
+	}, hidpp.SessionOptions{TransactionTimeout: 100 * time.Millisecond})
+
+	if _, err := opener("/dev/hidraw0"); err == nil || !strings.Contains(err.Error(), "no recognized HID++ report") {
+		t.Fatalf("non-HID++ opener error = %v", err)
+	}
+	if !nonHIDPP.isClosed() {
+		t.Fatal("non-HID++ candidate was not closed")
+	}
+	if got := nonHIDPP.writeCount(); got != 0 {
+		t.Fatalf("non-HID++ candidate received %d protocol writes", got)
+	}
+
+	opened, err := opener("/dev/hidraw2")
+	if err != nil {
+		t.Fatalf("recognized descriptor was rejected: %v", err)
+	}
+	if opened.Client == nil || opened.Metadata.Path != "/dev/hidraw2" {
+		t.Fatalf("recognized candidate opened as %+v", opened)
+	}
+	if got := recognized.writeCount(); got != 0 {
+		t.Fatalf("recognized candidate received %d writes before probing", got)
+	}
+	if err := opened.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type descriptorSystemDevice struct {
+	descriptor []byte
+	closed     chan struct{}
+	closeOnce  sync.Once
+	mu         sync.Mutex
+	writes     int
+}
+
+func newDescriptorSystemDevice(descriptor []byte) *descriptorSystemDevice {
+	return &descriptorSystemDevice{
+		descriptor: descriptor,
+		closed:     make(chan struct{}),
+	}
+}
+
+func (d *descriptorSystemDevice) ReadReport([]byte) (int, error) {
+	<-d.closed
+	return 0, os.ErrClosed
+}
+
+func (d *descriptorSystemDevice) WriteReport([]byte) error {
+	d.mu.Lock()
+	d.writes++
+	d.mu.Unlock()
+	return nil
+}
+
+func (d *descriptorSystemDevice) Close() error {
+	d.closeOnce.Do(func() { close(d.closed) })
+	return nil
+}
+
+func (d *descriptorSystemDevice) GetRawInfo() (hidraw.RawInfo, error) {
+	return hidraw.RawInfo{BusType: 3, VendorID: 0x046d, ProductID: BoltReceiverProductID}, nil
+}
+
+func (d *descriptorSystemDevice) GetReportDescriptor() ([]byte, error) {
+	return append([]byte(nil), d.descriptor...), nil
+}
+
+func (d *descriptorSystemDevice) isClosed() bool {
+	select {
+	case <-d.closed:
+		return true
+	default:
+		return false
+	}
+}
+
+func (d *descriptorSystemDevice) writeCount() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.writes
 }
 
 func unifyingClient() *fakeRegisterClient {
