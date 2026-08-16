@@ -102,6 +102,16 @@ func (e *ProtocolError) Unwrap() error {
 	return ErrProtocol
 }
 
+// FeatureIndex returns the HID++ 2.0 feature index associated with the error.
+// For a HID++ 1.0 error this is the original request sub-ID as well, which
+// keeps callers independent of the wire dialect.
+func (e *ProtocolError) FeatureIndex() byte {
+	if e == nil {
+		return 0
+	}
+	return e.RequestSubID
+}
+
 // ClosedTransportError reports a read or close event that made the session
 // unusable. Cause retains the transport's original error when available.
 type ClosedTransportError struct {

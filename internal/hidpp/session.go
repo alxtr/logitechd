@@ -48,6 +48,12 @@ type Request struct {
 // Session owns one physical HID++ transport and dispatches its responses to
 // concurrent logical transactions. Writes are serialized, while the reader
 // remains shared so multiple device indexes can use one receiver later.
+//
+// The concurrency invariant is that this is the only reader and every request
+// is matched using its device index plus protocol-specific command identity.
+// Callers may issue receiver (0xff) and child requests concurrently; they do
+// not use a transport-level lock or a second reader. The write gate protects
+// report writes, and the pending table protects response ownership.
 type Session struct {
 	transport Transport
 	timeout   time.Duration
@@ -66,8 +72,10 @@ type Session struct {
 
 	done chan struct{}
 
-	reportHandlerMu sync.RWMutex
-	reportHandler   func(Report)
+	reportHandlerMu  sync.RWMutex
+	reportHandler    func(Report)
+	subscriptions    map[uint64]func(Report)
+	nextSubscription uint64
 }
 
 type responseKey struct {
@@ -109,11 +117,12 @@ func NewSession(transport Transport, options ...SessionOptions) (*Session, error
 	}
 
 	s := &Session{
-		transport: transport,
-		timeout:   timeout,
-		writeGate: make(chan struct{}, 1),
-		pending:   make(map[responseKey][]*pendingTransaction),
-		done:      make(chan struct{}),
+		transport:     transport,
+		timeout:       timeout,
+		writeGate:     make(chan struct{}, 1),
+		pending:       make(map[responseKey][]*pendingTransaction),
+		done:          make(chan struct{}),
+		subscriptions: make(map[uint64]func(Report)),
 	}
 	s.writeGate <- struct{}{}
 	go s.readLoop()
@@ -139,6 +148,30 @@ func (s *Session) SetReportHandler(handler func(Report)) {
 	s.reportHandlerMu.Unlock()
 }
 
+// SubscribeReport registers a callback for reports not consumed by an
+// Exchange. It is useful for independent child-device event consumers sharing
+// this session. The returned function is idempotent and removes the callback.
+// The callback runs on the session reader goroutine and must return promptly.
+func (s *Session) SubscribeReport(handler func(Report)) func() {
+	if s == nil || handler == nil {
+		return func() {}
+	}
+	s.reportHandlerMu.Lock()
+	s.nextSubscription++
+	id := s.nextSubscription
+	s.subscriptions[id] = handler
+	s.reportHandlerMu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			s.reportHandlerMu.Lock()
+			delete(s.subscriptions, id)
+			s.reportHandlerMu.Unlock()
+		})
+	}
+}
+
 // Exchange writes request and waits for its matching response. Unrelated
 // reports are left available to their own transaction (or ignored when no
 // transaction is waiting for them).
@@ -146,10 +179,16 @@ func (s *Session) Exchange(ctx context.Context, request Request) (Report, error)
 	if ctx == nil {
 		return Report{}, errors.New("hidpp: nil context")
 	}
-	if request.ResponseSubID == RegisterErrorSubID {
+	if request.Report.Type == ReportTypeShort && request.ResponseSubID == RegisterErrorSubID {
 		return Report{}, &UnsupportedError{
 			Operation: "response sub-ID",
 			Detail:    "error reports cannot be transaction responses",
+		}
+	}
+	if request.Report.Type != ReportTypeShort && request.ResponseSubID == FeatureErrorSubID {
+		return Report{}, &UnsupportedError{
+			Operation: "response feature index",
+			Detail:    "HID++ 2.0 error reports cannot be transaction responses",
 		}
 	}
 	data, err := Build(request.Report)
@@ -282,13 +321,24 @@ func (s *Session) readLoop() {
 }
 
 func (s *Session) dispatch(report Report) {
-	if report.SubID == RegisterErrorSubID {
+	if report.Type == ReportTypeShort && report.SubID == RegisterErrorSubID {
 		protocolError, err := protocolErrorFromReport(report)
 		if err != nil {
 			s.failPending(err)
 			return
 		}
 		if transaction := s.takePendingError(report.DeviceIndex, protocolError.RequestSubID, protocolError.RequestAddress); transaction != nil {
+			transaction.result <- transactionResult{err: protocolError}
+		}
+		return
+	}
+	if report.Type != ReportTypeShort && report.SubID == FeatureErrorSubID {
+		protocolError, err := protocolErrorFromFeatureReport(report)
+		if err != nil {
+			s.failPending(err)
+			return
+		}
+		if transaction := s.takePendingFeatureError(report.DeviceIndex, protocolError.RequestSubID, protocolError.RequestAddress); transaction != nil {
 			transaction.result <- transactionResult{err: protocolError}
 		}
 		return
@@ -306,9 +356,16 @@ func (s *Session) dispatch(report Report) {
 
 	s.reportHandlerMu.RLock()
 	handler := s.reportHandler
+	callbacks := make([]func(Report), 0, len(s.subscriptions))
+	for _, callback := range s.subscriptions {
+		callbacks = append(callbacks, callback)
+	}
 	s.reportHandlerMu.RUnlock()
 	if handler != nil {
 		handler(report)
+	}
+	for _, callback := range callbacks {
+		callback(report)
 	}
 }
 
@@ -322,6 +379,23 @@ func protocolErrorFromReport(report Report) (*ProtocolError, error) {
 		RequestSubID:   parameters[0],
 		RequestAddress: parameters[1],
 		Code:           parameters[2],
+		Parameters:     parameters,
+	}, nil
+}
+
+// HID++ 2.0 errors use feature index 0xff. The command byte contains the
+// feature index from the failed request and parameter zero contains its
+// function/software-ID byte; parameter one is the error code.
+func protocolErrorFromFeatureReport(report Report) (*ProtocolError, error) {
+	if len(report.Parameters) < 2 {
+		return nil, malformedResponse(nil, fmt.Errorf("HID++ 2.0 error report has %d parameters, need 2", len(report.Parameters)))
+	}
+	parameters := append([]byte(nil), report.Parameters...)
+	return &ProtocolError{
+		DeviceIndex:    report.DeviceIndex,
+		RequestSubID:   report.CommandByte(),
+		RequestAddress: parameters[0],
+		Code:           parameters[1],
 		Parameters:     parameters,
 	}, nil
 }
@@ -379,6 +453,10 @@ func (s *Session) takePendingError(deviceIndex, subID, address byte) *pendingTra
 		s.pending[selectedKey] = transactions[1:]
 	}
 	return selected
+}
+
+func (s *Session) takePendingFeatureError(deviceIndex, featureIndex, command byte) *pendingTransaction {
+	return s.takePending(responseKey{deviceIndex: deviceIndex, subID: featureIndex, address: command})
 }
 
 func (s *Session) removePending(target *pendingTransaction) {

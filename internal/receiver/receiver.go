@@ -1,6 +1,5 @@
-// Package receiver implements the HID++ 1.0 receiver part of Logitech's
-// Bolt and Unifying protocols. It deliberately stops at paired-device
-// inspection; pairing and HID++ 2.0 device features are outside this phase.
+// Package receiver implements the HID++ 1.0 receiver side of Bolt and
+// Unifying protocols and owns persistent shared-stream child lifecycles.
 package receiver
 
 import (
@@ -156,8 +155,11 @@ func FindPairedDevice(devices []PairedDevice, name string, slot byte) (PairedDev
 // by a receiver. Slot is the HID++ device index. HasPID is false for the
 // short unpair form, which carries no product identifier.
 type DeviceEvent struct {
-	Slot            byte
-	Connected       bool
+	Slot      byte
+	Connected bool
+	// Sleeping means the receiver still considers the slot paired but the
+	// wireless link is temporarily unavailable. It is distinct from removal.
+	Sleeping        bool
 	Paired          bool
 	HasPID          bool
 	PID             uint16
@@ -185,6 +187,7 @@ func ParseDeviceEvent(report hidpp.Report) (DeviceEvent, error) {
 		}
 		flags := report.Parameters[0]
 		event.Connected = flags&0x40 == 0
+		event.Sleeping = !event.Connected
 		event.Paired = true
 		event.HasPID = true
 		event.PID = uint16(report.Parameters[2])<<8 | uint16(report.Parameters[1])
@@ -197,6 +200,7 @@ func ParseDeviceEvent(report hidpp.Report) (DeviceEvent, error) {
 		// emits a similarly shaped status without the unpair marker.
 		event.Connected = false
 		event.Paired = report.CommandByte() != 0x02
+		event.Sleeping = event.Paired
 		if len(report.Parameters) >= 3 && !allZero(report.Parameters) {
 			event.HasPID = true
 			event.PID = uint16(report.Parameters[2])<<8 | uint16(report.Parameters[1])
@@ -328,13 +332,30 @@ func (r *Receiver) SetEventHandler(handler EventHandler) error {
 		r.reports.SetReportHandler(nil)
 		return nil
 	}
-	r.reports.SetReportHandler(func(report hidpp.Report) {
+	return r.SetReportHandler(func(report hidpp.Report) {
 		if report.SubID != connectionNotification && report.SubID != unpairNotification {
 			return
 		}
 		event, err := ParseDeviceEvent(report)
 		handler(event, err)
 	})
+}
+
+// SetReportHandler installs a handler for every report not consumed by a
+// transaction on the shared report source. ReceiverSession uses this to
+// route both receiver notifications and unsolicited child HID++ 2.0 reports
+// without creating a second reader.
+func (r *Receiver) SetReportHandler(handler func(hidpp.Report)) error {
+	if r == nil {
+		return errors.New("receiver: nil receiver")
+	}
+	if r.reports == nil {
+		return errors.New("receiver: no report source")
+	}
+	if err := r.checkUsable(); err != nil {
+		return err
+	}
+	r.reports.SetReportHandler(handler)
 	return nil
 }
 
