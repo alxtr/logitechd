@@ -26,9 +26,19 @@ const (
 // use a short report, and four to sixteen bytes use a long report. The HID++
 // long-register address range also selects a long report.
 func (s *Session) GetRegister(ctx context.Context, deviceIndex byte, address uint16, size int) ([]byte, error) {
+	return s.GetRegisterWithParameters(ctx, deviceIndex, address, size)
+}
+
+// GetRegisterWithParameters reads a register whose long-register request
+// carries a subregister selector. The ordinary GetRegister API remains
+// unchanged for existing callers.
+func (s *Session) GetRegisterWithParameters(ctx context.Context, deviceIndex byte, address uint16, size int, requestParameters ...byte) ([]byte, error) {
 	reportType, err := registerReportType(address, size)
 	if err != nil {
 		return nil, err
+	}
+	if len(requestParameters) > reportParameterCapacity(reportType) {
+		return nil, unsupportedRegisterPayload(len(requestParameters))
 	}
 	command, subID, err := registerRequestFields(address, false)
 	if err != nil {
@@ -41,6 +51,7 @@ func (s *Session) GetRegister(ctx context.Context, deviceIndex byte, address uin
 			SubID:       subID,
 			Function:    command >> 4,
 			SoftwareID:  command & 0x0f,
+			Parameters:  append([]byte(nil), requestParameters...),
 		},
 		ResponseSubID: subID,
 	})
@@ -51,6 +62,13 @@ func (s *Session) GetRegister(ctx context.Context, deviceIndex byte, address uin
 		return nil, malformedResponse(nil, fmt.Errorf("get-register response has %d parameters, need %d", len(response.Parameters), size))
 	}
 	return append([]byte(nil), response.Parameters[:size]...), nil
+}
+
+func reportParameterCapacity(reportType ReportType) int {
+	if reportType == ReportTypeShort {
+		return shortParameterLen
+	}
+	return longParameterLen
 }
 
 // SetRegister writes a HID++ 1.0 register and waits for the normal register

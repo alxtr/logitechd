@@ -65,6 +65,9 @@ type Session struct {
 	nextOrder uint64
 
 	done chan struct{}
+
+	reportHandlerMu sync.RWMutex
+	reportHandler   func(Report)
 }
 
 type responseKey struct {
@@ -120,6 +123,20 @@ func NewSession(transport Transport, options ...SessionOptions) (*Session, error
 // NewDefaultSession is a convenience constructor using the default timeout.
 func NewDefaultSession(transport Transport) (*Session, error) {
 	return NewSession(transport, SessionOptions{})
+}
+
+// SetReportHandler installs a callback for reports that are not consumed by a
+// waiting Exchange. HID++ notifications are unsolicited reports, so this is
+// the hook used by higher layers while keeping one reader for one transport.
+// The callback runs on the session reader goroutine and should return
+// promptly. Passing nil removes the current callback.
+func (s *Session) SetReportHandler(handler func(Report)) {
+	if s == nil {
+		return
+	}
+	s.reportHandlerMu.Lock()
+	s.reportHandler = handler
+	s.reportHandlerMu.Unlock()
 }
 
 // Exchange writes request and waits for its matching response. Unrelated
@@ -284,6 +301,14 @@ func (s *Session) dispatch(report Report) {
 	}
 	if transaction := s.takePending(key); transaction != nil {
 		transaction.result <- transactionResult{report: report}
+		return
+	}
+
+	s.reportHandlerMu.RLock()
+	handler := s.reportHandler
+	s.reportHandlerMu.RUnlock()
+	if handler != nil {
+		handler(report)
 	}
 }
 

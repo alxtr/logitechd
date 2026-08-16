@@ -251,6 +251,45 @@ func TestLongRegisterAddressUsesLongSubIDs(t *testing.T) {
 	}
 }
 
+func TestLongRegisterReadCarriesSubregisterSelector(t *testing.T) {
+	transport := newMemoryTransport()
+	session, err := NewDefaultSession(transport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	resultCh := make(chan struct {
+		value []byte
+		err   error
+	}, 1)
+	go func() {
+		value, err := session.GetRegisterWithParameters(context.Background(), 0xff, 0x2b5, 7, 0x22)
+		resultCh <- struct {
+			value []byte
+			err   error
+		}{value: value, err: err}
+	}()
+
+	request := receiveWrite(t, transport)
+	wantPrefix := []byte{LongReportID, 0xff, RegisterLongGetSubID, 0xb5, 0x22}
+	if !bytes.Equal(request[:len(wantPrefix)], wantPrefix) {
+		t.Fatalf("long subregister request = %x, want prefix %x", request, wantPrefix)
+	}
+	transport.respond(Report{
+		Type:        ReportTypeLong,
+		DeviceIndex: 0xff,
+		SubID:       RegisterLongGetSubID,
+		Function:    0x0b,
+		SoftwareID:  0x05,
+		Parameters:  []byte{1, 2, 3, 4, 5, 6, 7},
+	})
+	result := <-resultCh
+	if result.err != nil || !bytes.Equal(result.value, []byte{1, 2, 3, 4, 5, 6, 7}) {
+		t.Fatalf("long subregister result = %x, %v", result.value, result.err)
+	}
+}
+
 func TestSessionReportsMalformedResponse(t *testing.T) {
 	transport := newMemoryTransport()
 	session, err := NewDefaultSession(transport)
