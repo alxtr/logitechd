@@ -274,44 +274,42 @@ func (c *Configurator) Apply(ctx context.Context) error {
 
 func (c *Configurator) applySmartShift(ctx context.Context) error {
 	setting := c.settings.SmartShift
-	hasTuning := setting != nil && (setting.Threshold != nil || setting.Torque != nil)
-	if c.settings.ScrollMode == nil && !hasTuning {
+	if setting == nil || (setting.Enabled == nil && setting.Threshold == nil && setting.Torque == nil) {
 		return nil
 	}
 	if c.features.SmartShift == nil {
 		return fmt.Errorf("%w: smart shift", ErrNoFeature)
 	}
-	var original *SmartShiftStatus
-	if c.settings.ScrollMode != nil || (setting != nil && setting.Threshold != nil) {
-		status, err := c.features.SmartShift.GetStatus(ctx)
+	status, err := c.features.SmartShift.GetStatus(ctx)
+	if err != nil {
+		return fmt.Errorf("mxmaster: read smart shift: %w", err)
+	}
+
+	var mode SmartShiftMode
+	var threshold byte
+	if setting.Enabled != nil {
+		mode, threshold, err = resolveSmartShiftState(*setting.Enabled, setting.Threshold, status.Threshold)
 		if err != nil {
-			return fmt.Errorf("mxmaster: read smart shift: %w", err)
+			return err
 		}
-		mode, threshold := status.Mode, status.Threshold
-		if c.settings.ScrollMode != nil {
-			mode, err = smartShiftMode(*c.settings.ScrollMode)
-			if err != nil {
-				return err
-			}
-		}
-		if setting != nil && setting.Threshold != nil {
-			threshold = byte(*setting.Threshold)
-		}
-		original = &status
-		c.addSmartShiftCleanup(status)
+	} else if setting.Threshold != nil && (*setting.Threshold < 1 || *setting.Threshold > 255) {
+		return fmt.Errorf("%w: smart_shift.threshold %d is outside 1..255", config.ErrInvalidConfig, *setting.Threshold)
+	}
+	c.addSmartShiftCleanup(status)
+
+	if setting.Enabled != nil {
 		if err := c.features.SmartShift.SetStatus(ctx, mode, threshold); err != nil {
 			return fmt.Errorf("mxmaster: set smart shift: %w", err)
 		}
-	}
-	if setting != nil && setting.Torque != nil {
-		if original == nil {
-			status, err := c.features.SmartShift.GetStatus(ctx)
-			if err != nil {
-				return fmt.Errorf("mxmaster: read smart shift: %w", err)
-			}
-			original = &status
-			c.addSmartShiftCleanup(status)
+	} else if setting.Threshold != nil {
+		// Mode zero is a set-only preserve sentinel. Using SetThreshold avoids
+		// changing the mechanical mode if the physical button is pressed between
+		// reading the original state and applying this tuning value.
+		if err := c.features.SmartShift.SetThreshold(ctx, byte(*setting.Threshold)); err != nil {
+			return fmt.Errorf("mxmaster: set smart shift threshold: %w", err)
 		}
+	}
+	if setting.Torque != nil {
 		if err := c.features.SmartShift.SetTorque(ctx, byte(*setting.Torque)); err != nil {
 			if !isUnsupportedSmartShiftTorque(err) {
 				return fmt.Errorf("mxmaster: set smart shift torque: %w", err)
@@ -321,17 +319,21 @@ func (c *Configurator) applySmartShift(ctx context.Context) error {
 	return nil
 }
 
-func smartShiftMode(mode config.ScrollMode) (SmartShiftMode, error) {
-	switch mode {
-	case config.ScrollModeSmartShift:
-		return SmartShiftModeSmartShift, nil
-	case config.ScrollModeFreeSpin:
-		return SmartShiftModeFreeSpin, nil
-	case config.ScrollModeRatchet:
-		return SmartShiftModeRatchet, nil
-	default:
-		return 0, fmt.Errorf("%w: scroll_mode %q is unknown", config.ErrInvalidConfig, mode)
+func resolveSmartShiftState(enabled bool, configuredThreshold *int, currentThreshold byte) (SmartShiftMode, byte, error) {
+	if !enabled {
+		if configuredThreshold != nil {
+			return 0, 0, fmt.Errorf("%w: smart_shift.threshold cannot be set when smart_shift.enabled is false", config.ErrInvalidConfig)
+		}
+		return SmartShiftModeFreeSpin, 255, nil
 	}
+	threshold := int(currentThreshold)
+	if configuredThreshold != nil {
+		threshold = *configuredThreshold
+	}
+	if threshold < 1 || threshold > 255 {
+		return 0, 0, fmt.Errorf("%w: smart_shift.threshold %d is outside 1..255", config.ErrInvalidConfig, threshold)
+	}
+	return SmartShiftModeRatchet, byte(threshold), nil
 }
 
 func isUnsupportedSmartShiftTorque(err error) bool {

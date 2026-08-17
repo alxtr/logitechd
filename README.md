@@ -106,23 +106,30 @@ device:
   name: MX Master 3S
   index: 2
 
-scroll_mode: free_spin
-
 smart_shift:
-  threshold: 100
+  enabled: true
+  threshold: 255
   torque: 100
 ```
 
-`scroll_mode` controls the main wheel's mechanical mode: `smart_shift` switches
-between ratcheted and free-spinning behavior based on wheel speed, `free_spin`
-keeps it free-spinning, and `ratchet` keeps it ratcheted. Omit `scroll_mode` to
-leave the current device mode unchanged. The optional `smart_shift.threshold`
-and `smart_shift.torque` fields tune the switching threshold and ratchet torque.
+`smart_shift.enabled` controls the main wheel's mechanical mode. `false` fixes
+the wheel in free-spin mode and disables speed-based switching; it cannot be
+combined with `threshold`. `true` starts in ratchet mode. With a threshold from
+`1..254`, wheel speed can disengage the ratchet; threshold `255` disables that
+automatic disengagement and therefore fixes the wheel in ratchet mode. If
+`enabled: true` is set without a threshold, the current threshold is reused,
+including `255`.
 
-The daemon reapplies a configured mode at startup and whenever it configures the
-mouse again after reconnect or resume. It does not manage the physical wheel
-mode button after that initial application, so pressing the button can change
-the mode until the next startup, reconnect, or resume.
+Omit `enabled` to preserve the current mechanical mode. An explicit threshold
+can then update only the speed-switching threshold, and `torque` can update only
+ratchet torque. Threshold uses the device's `1..255` byte scale; torque uses
+`1..100` and requires device support for the enhanced SmartShift feature.
+
+The daemon reapplies an explicitly enabled or disabled mode at startup and
+whenever it configures the mouse again after reconnect or resume. It does not
+manage the physical wheel mode button after that initial application, so
+pressing the button can change the mode until the next startup, reconnect, or
+resume.
 
 The receiver path is discovered automatically. On systems with multiple
 receivers, set it explicitly:
