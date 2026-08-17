@@ -66,10 +66,9 @@ func TestApplySmartShiftIgnoresUnsupportedTorque(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	enabled, threshold, torque := true, 100, 70
+	mode, threshold, torque := config.ScrollModeSmartShift, 100, 70
 	configurator := &Configurator{
-		settings: config.Config{SmartShift: &config.SmartShiftConfig{
-			Enabled:   &enabled,
+		settings: config.Config{ScrollMode: &mode, SmartShift: &config.SmartShiftConfig{
 			Threshold: &threshold,
 			Torque:    &torque,
 		}},
@@ -122,10 +121,9 @@ func TestApplySmartShiftPropagatesTorqueFailures(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			enabled, threshold, torque := true, 100, 70
+			mode, threshold, torque := config.ScrollModeSmartShift, 100, 70
 			configurator := &Configurator{
-				settings: config.Config{SmartShift: &config.SmartShiftConfig{
-					Enabled:   &enabled,
+				settings: config.Config{ScrollMode: &mode, SmartShift: &config.SmartShiftConfig{
 					Threshold: &threshold,
 					Torque:    &torque,
 				}},
@@ -140,7 +138,7 @@ func TestApplySmartShiftPropagatesTorqueFailures(t *testing.T) {
 	}
 }
 
-func TestSmartShiftVersionFallbackAndWireFormats(t *testing.T) {
+func TestSmartShiftVersionFallbackAndStatus(t *testing.T) {
 	v1 := featureDevice(FeatureSmartShift, 3)
 	v1.responses[0x00] = [][]byte{{1, 20}}
 	client, err := NewSmartShift(context.Background(), v1)
@@ -151,30 +149,155 @@ func TestSmartShiftVersionFallbackAndWireFormats(t *testing.T) {
 		t.Fatalf("client version/index = %d/%d", client.Version(), client.FeatureIndex())
 	}
 	status, err := client.GetStatus(context.Background())
-	if err != nil || status.Enabled || status.Threshold != 20 {
+	if err != nil || status.Mode != SmartShiftModeFreeSpin || status.Threshold != 20 {
 		t.Fatalf("status = %+v, error=%v", status, err)
 	}
 
 	v2 := featureDevice(FeatureSmartShiftV2, 4)
-	v2.responses[0x10] = [][]byte{{0, 25, 70}, {0, 25, 70}}
-	v2.responses[0x00] = [][]byte{{1}, {1}}
-	v2.responses[0x20] = [][]byte{{0, 30, 80}}
+	v2.responses[0x10] = [][]byte{{0, 25, 70}}
+	v2.responses[0x00] = [][]byte{{1}}
 	client, err = NewSmartShift(context.Background(), v2)
 	if err != nil {
 		t.Fatal(err)
 	}
 	status, err = client.GetStatus(context.Background())
-	if err != nil || !status.Enabled || !status.TorqueSupported || status.Torque != 70 {
+	if err != nil || status.Mode != SmartShiftModeSmartShift || !status.TorqueSupported || status.Torque != 70 {
 		t.Fatalf("enhanced status = %+v, error=%v", status, err)
 	}
-	if err := client.SetStatus(context.Background(), true, 100); err != nil {
+}
+
+func TestSmartShiftExplicitModeWireFormats(t *testing.T) {
+	tests := []struct {
+		name       string
+		feature    uint16
+		setFn      byte
+		wantTorque bool
+	}{
+		{name: "v1", feature: FeatureSmartShift, setFn: 0x10},
+		{name: "v2", feature: FeatureSmartShiftV2, setFn: 0x20, wantTorque: true},
+	}
+	modes := []SmartShiftMode{SmartShiftModeSmartShift, SmartShiftModeFreeSpin, SmartShiftModeRatchet}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fake := featureDevice(test.feature, 4)
+			if test.wantTorque {
+				fake.responses[0x10] = [][]byte{{0, 25, 70}, {0, 25, 70}, {0, 25, 70}}
+				fake.responses[0x00] = [][]byte{{1}, {1}, {1}}
+			}
+			fake.responses[test.setFn] = [][]byte{{}, {}, {}}
+			client, err := NewSmartShift(context.Background(), fake)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			for _, mode := range modes {
+				if err := client.SetStatus(context.Background(), mode, 100); err != nil {
+					t.Fatalf("SetStatus(%d) error = %v", mode, err)
+				}
+				want := []byte{byte(mode), 100}
+				if test.wantTorque {
+					want = append(want, 70)
+				}
+				if got := fake.calls[len(fake.calls)-1]; got.fn != test.setFn || !reflect.DeepEqual(got.params, want) {
+					t.Fatalf("SetStatus(%d) call = %+v, want function %#x params %v", mode, got, test.setFn, want)
+				}
+			}
+			if err := client.SetStatus(context.Background(), SmartShiftMode(3), 100); err == nil {
+				t.Fatal("unknown mode was accepted")
+			}
+			if err := client.SetStatus(context.Background(), SmartShiftModeSmartShift, 0); err == nil {
+				t.Fatal("zero threshold was accepted")
+			}
+		})
+	}
+}
+
+func TestApplySmartShiftRatchetRetainsThresholdAndTorque(t *testing.T) {
+	fake := featureDevice(FeatureSmartShiftV2, 4)
+	fake.responses[0x10] = [][]byte{{0, 20, 70}, {0, 20, 70}, {2, 100, 70}}
+	fake.responses[0x00] = [][]byte{{1}, {1}, {1}}
+	fake.responses[0x20] = [][]byte{{}, {}}
+	client, err := NewSmartShift(context.Background(), fake)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if got := v2.calls[len(v2.calls)-1]; got.fn != 0x20 || !reflect.DeepEqual(got.params, []byte{0, 100, 70}) {
-		t.Fatalf("enhanced set = %+v", got)
+	mode, threshold, torque := config.ScrollModeRatchet, 100, 80
+	configurator := &Configurator{
+		settings: config.Config{ScrollMode: &mode, SmartShift: &config.SmartShiftConfig{
+			Threshold: &threshold,
+			Torque:    &torque,
+		}},
+		features: &FeatureSet{SmartShift: client},
 	}
-	if err := client.SetStatus(context.Background(), true, 0); err == nil {
-		t.Fatal("zero threshold was accepted")
+
+	if err := configurator.applySmartShift(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var sets [][]byte
+	for _, call := range fake.calls {
+		if call.fn == 0x20 {
+			sets = append(sets, call.params)
+		}
+	}
+	want := [][]byte{{2, 100, 70}, {2, 100, 80}}
+	if !reflect.DeepEqual(sets, want) {
+		t.Fatalf("SmartShift sets = %v, want %v", sets, want)
+	}
+}
+
+func TestApplySmartShiftOmittedModePreservesCurrentMode(t *testing.T) {
+	fake := featureDevice(FeatureSmartShift, 3)
+	fake.responses[0x00] = [][]byte{{2, 25}}
+	fake.responses[0x10] = [][]byte{{}}
+	client, err := NewSmartShift(context.Background(), fake)
+	if err != nil {
+		t.Fatal(err)
+	}
+	threshold := 100
+	configurator := &Configurator{
+		settings: config.Config{SmartShift: &config.SmartShiftConfig{Threshold: &threshold}},
+		features: &FeatureSet{SmartShift: client},
+	}
+
+	if err := configurator.applySmartShift(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := fake.calls[len(fake.calls)-1]; got.fn != 0x10 || !reflect.DeepEqual(got.params, []byte{2, 100}) {
+		t.Fatalf("threshold set = %+v, want mode 2 and threshold 100", got)
+	}
+}
+
+func TestSmartShiftCleanupRestoresExactMode(t *testing.T) {
+	fake := featureDevice(FeatureSmartShift, 3)
+	fake.responses[0x00] = [][]byte{{2, 25}}
+	fake.responses[0x10] = [][]byte{{}, {}}
+	client, err := NewSmartShift(context.Background(), fake)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mode := config.ScrollModeSmartShift
+	configurator := &Configurator{
+		settings: config.Config{ScrollMode: &mode},
+		features: &FeatureSet{SmartShift: client},
+		events:   make(chan InputEvent),
+	}
+
+	if err := configurator.applySmartShift(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := configurator.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var sets [][]byte
+	for _, call := range fake.calls {
+		if call.fn == 0x10 {
+			sets = append(sets, call.params)
+		}
+	}
+	want := [][]byte{{0, 25}, {2, 25}}
+	if !reflect.DeepEqual(sets, want) {
+		t.Fatalf("SmartShift sets = %v, want %v", sets, want)
 	}
 }
 

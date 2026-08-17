@@ -14,8 +14,8 @@ device:
   name: MX Master 3S
   index: 2
 dpi: 1600
+scroll_mode: ratchet
 smart_shift:
-  enabled: true
   threshold: 100
   torque: 100
 hires_scroll:
@@ -40,6 +40,9 @@ buttons:
 	if value.Receiver.Type != ReceiverBolt || value.Device.Index != 2 || value.DPI == nil || *value.DPI != 1600 {
 		t.Fatalf("decoded config = %+v", value)
 	}
+	if value.ScrollMode == nil || *value.ScrollMode != ScrollModeRatchet {
+		t.Fatalf("decoded scroll mode = %v", value.ScrollMode)
+	}
 	if value.SmartShift == nil || value.SmartShift.Threshold == nil || *value.SmartShift.Threshold != 100 || value.SmartShift.Torque == nil || *value.SmartShift.Torque != 100 {
 		t.Fatalf("decoded smart shift = %+v", value.SmartShift)
 	}
@@ -60,11 +63,34 @@ func TestLoadRejectsUnknownFieldsAndMultipleDocuments(t *testing.T) {
 	for name, data := range map[string]string{
 		"root":     "unknown: true\n",
 		"nested":   "smart_shift:\n  threshold: 10\n  unknown: true\n",
+		"enabled":  "smart_shift:\n  enabled: true\n",
 		"action":   "buttons:\n  0x0053:\n    action: key\n    unknown: A\n",
 		"multiple": "{}\n---\n{}\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := Load([]byte(data)); err == nil || !errors.Is(err, ErrInvalidConfig) {
+				t.Fatalf("Load() error = %v, want invalid config", err)
+			}
+		})
+	}
+}
+
+func TestLoadValidatesScrollModes(t *testing.T) {
+	for _, mode := range []ScrollMode{ScrollModeSmartShift, ScrollModeFreeSpin, ScrollModeRatchet} {
+		t.Run(string(mode), func(t *testing.T) {
+			value, err := Load([]byte("scroll_mode: " + string(mode) + "\n"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if value.ScrollMode == nil || *value.ScrollMode != mode {
+				t.Fatalf("scroll mode = %v, want %q", value.ScrollMode, mode)
+			}
+		})
+	}
+
+	for _, mode := range []string{"", "smartshift", "free-spin", "automatic", "3"} {
+		t.Run("reject_"+mode, func(t *testing.T) {
+			if _, err := Load([]byte("scroll_mode: \"" + mode + "\"\n")); err == nil || !errors.Is(err, ErrInvalidConfig) {
 				t.Fatalf("Load() error = %v, want invalid config", err)
 			}
 		})

@@ -106,11 +106,23 @@ device:
   name: MX Master 3S
   index: 2
 
+scroll_mode: free_spin
+
 smart_shift:
-  enabled: false
   threshold: 100
   torque: 100
 ```
+
+`scroll_mode` controls the main wheel's mechanical mode: `smart_shift` switches
+between ratcheted and free-spinning behavior based on wheel speed, `free_spin`
+keeps it free-spinning, and `ratchet` keeps it ratcheted. Omit `scroll_mode` to
+leave the current device mode unchanged. The optional `smart_shift.threshold`
+and `smart_shift.torque` fields tune the switching threshold and ratchet torque.
+
+The daemon reapplies a configured mode at startup and whenever it configures the
+mouse again after reconnect or resume. It does not manage the physical wheel
+mode button after that initial application, so pressing the button can change
+the mode until the next startup, reconnect, or resume.
 
 The receiver path is discovered automatically. On systems with multiple
 receivers, set it explicitly:

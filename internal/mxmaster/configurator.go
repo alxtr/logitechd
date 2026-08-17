@@ -274,32 +274,36 @@ func (c *Configurator) Apply(ctx context.Context) error {
 
 func (c *Configurator) applySmartShift(ctx context.Context) error {
 	setting := c.settings.SmartShift
-	if setting == nil {
+	hasTuning := setting != nil && (setting.Threshold != nil || setting.Torque != nil)
+	if c.settings.ScrollMode == nil && !hasTuning {
 		return nil
 	}
 	if c.features.SmartShift == nil {
 		return fmt.Errorf("%w: smart shift", ErrNoFeature)
 	}
 	var original *SmartShiftStatus
-	if setting.Enabled != nil || setting.Threshold != nil {
+	if c.settings.ScrollMode != nil || (setting != nil && setting.Threshold != nil) {
 		status, err := c.features.SmartShift.GetStatus(ctx)
 		if err != nil {
 			return fmt.Errorf("mxmaster: read smart shift: %w", err)
 		}
-		enabled, threshold := status.Enabled, status.Threshold
-		if setting.Enabled != nil {
-			enabled = *setting.Enabled
+		mode, threshold := status.Mode, status.Threshold
+		if c.settings.ScrollMode != nil {
+			mode, err = smartShiftMode(*c.settings.ScrollMode)
+			if err != nil {
+				return err
+			}
 		}
-		if setting.Threshold != nil {
+		if setting != nil && setting.Threshold != nil {
 			threshold = byte(*setting.Threshold)
 		}
 		original = &status
 		c.addSmartShiftCleanup(status)
-		if err := c.features.SmartShift.SetStatus(ctx, enabled, threshold); err != nil {
+		if err := c.features.SmartShift.SetStatus(ctx, mode, threshold); err != nil {
 			return fmt.Errorf("mxmaster: set smart shift: %w", err)
 		}
 	}
-	if setting.Torque != nil {
+	if setting != nil && setting.Torque != nil {
 		if original == nil {
 			status, err := c.features.SmartShift.GetStatus(ctx)
 			if err != nil {
@@ -317,6 +321,19 @@ func (c *Configurator) applySmartShift(ctx context.Context) error {
 	return nil
 }
 
+func smartShiftMode(mode config.ScrollMode) (SmartShiftMode, error) {
+	switch mode {
+	case config.ScrollModeSmartShift:
+		return SmartShiftModeSmartShift, nil
+	case config.ScrollModeFreeSpin:
+		return SmartShiftModeFreeSpin, nil
+	case config.ScrollModeRatchet:
+		return SmartShiftModeRatchet, nil
+	default:
+		return 0, fmt.Errorf("%w: scroll_mode %q is unknown", config.ErrInvalidConfig, mode)
+	}
+}
+
 func isUnsupportedSmartShiftTorque(err error) bool {
 	var unsupported *hidpp.UnsupportedError
 	return errors.As(err, &unsupported) && unsupported.Operation == "smart shift torque"
@@ -324,7 +341,7 @@ func isUnsupportedSmartShiftTorque(err error) bool {
 
 func (c *Configurator) addSmartShiftCleanup(status SmartShiftStatus) {
 	c.addCleanup(func(ctx context.Context) error {
-		result := c.features.SmartShift.SetStatus(ctx, status.Enabled, status.Threshold)
+		result := c.features.SmartShift.SetStatus(ctx, status.Mode, status.Threshold)
 		if status.TorqueSupported {
 			result = errors.Join(result, c.features.SmartShift.SetTorque(ctx, status.Torque))
 		}

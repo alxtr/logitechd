@@ -49,13 +49,21 @@ type DeviceConfig struct {
 	Index uint8  `yaml:"index"`
 }
 
-// SmartShiftConfig contains the optional wheel ratchet settings. Threshold is
+// ScrollMode selects the mechanical mode of the main scroll wheel.
+type ScrollMode string
+
+const (
+	ScrollModeSmartShift ScrollMode = "smart_shift"
+	ScrollModeFreeSpin   ScrollMode = "free_spin"
+	ScrollModeRatchet    ScrollMode = "ratchet"
+)
+
+// SmartShiftConfig contains the optional wheel tuning settings. Threshold is
 // in the device's 1..255 byte scale and torque is in the enhanced feature's
 // 1..100 scale.
 type SmartShiftConfig struct {
-	Enabled   *bool `yaml:"enabled"`
-	Threshold *int  `yaml:"threshold"`
-	Torque    *int  `yaml:"torque"`
+	Threshold *int `yaml:"threshold"`
+	Torque    *int `yaml:"torque"`
 }
 
 // HiResScrollConfig controls high-resolution wheel reporting. Target is the
@@ -164,6 +172,7 @@ type Config struct {
 	Receiver    ReceiverConfig     `yaml:"receiver"`
 	Device      DeviceConfig       `yaml:"device"`
 	DPI         *int               `yaml:"dpi"`
+	ScrollMode  *ScrollMode        `yaml:"scroll_mode"`
 	SmartShift  *SmartShiftConfig  `yaml:"smart_shift"`
 	HiResScroll *HiResScrollConfig `yaml:"hires_scroll"`
 	ThumbWheel  *ThumbWheelConfig  `yaml:"thumb_wheel"`
@@ -245,6 +254,13 @@ func (c *Config) Validate() error {
 	}
 	if c.DPI != nil && (*c.DPI < MinDPI || *c.DPI > MaxDPI) {
 		return fmt.Errorf("%w: dpi %d is outside %d..%d", ErrInvalidConfig, *c.DPI, MinDPI, MaxDPI)
+	}
+	if c.ScrollMode != nil {
+		switch *c.ScrollMode {
+		case ScrollModeSmartShift, ScrollModeFreeSpin, ScrollModeRatchet:
+		default:
+			return fmt.Errorf("%w: scroll_mode %q is not smart_shift, free_spin, or ratchet", ErrInvalidConfig, *c.ScrollMode)
+		}
 	}
 	if c.SmartShift != nil {
 		if c.SmartShift.Threshold != nil && (*c.SmartShift.Threshold < 1 || *c.SmartShift.Threshold > 255) {

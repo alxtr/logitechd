@@ -10,8 +10,9 @@ device:
 
 # These settings are optional. If a device firmware does not expose an
 # optional feature, the daemon keeps running and reports that fact in its log.
+scroll_mode: smart_shift
+
 smart_shift:
-  enabled: true
   threshold: 25
   torque: 60
 

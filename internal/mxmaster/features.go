@@ -83,12 +83,21 @@ func call(ctx context.Context, device FeatureDevice, info hidpp.FeatureInfo, fun
 	return device.Call(ctx, info.Index, function, params)
 }
 
+// SmartShiftMode is the mechanical mode encoded by the HID++ SmartShift
+// features.
+type SmartShiftMode byte
+
+const (
+	SmartShiftModeSmartShift SmartShiftMode = 0
+	SmartShiftModeFreeSpin   SmartShiftMode = 1
+	SmartShiftModeRatchet    SmartShiftMode = 2
+)
+
 // SmartShiftStatus is the current wheel mode. Threshold is the device's
 // 1..255 byte value for the speed at which the wheel changes mode; Torque is
 // only meaningful on the enhanced feature variant.
 type SmartShiftStatus struct {
-	Enabled         bool
-	Mode            byte
+	Mode            SmartShiftMode
 	Threshold       byte
 	Torque          byte
 	TorqueSupported bool
@@ -150,11 +159,11 @@ func (s *SmartShift) GetStatus(ctx context.Context) (SmartShiftStatus, error) {
 	if err := need("smart shift status", data, 2); err != nil {
 		return SmartShiftStatus{}, err
 	}
-	status := SmartShiftStatus{
-		Mode:      data[0],
-		Threshold: data[1],
-		Enabled:   data[0] != 1,
+	mode := SmartShiftMode(data[0])
+	if !validSmartShiftMode(mode) {
+		return SmartShiftStatus{}, fmt.Errorf("%w: smart shift mode %d is unknown", hidpp.ErrMalformedResponse, mode)
 	}
+	status := SmartShiftStatus{Mode: mode, Threshold: data[1]}
 	if s.version == 2 {
 		capabilities, capErr := call(ctx, s.device, s.info, 0x00)
 		if capErr != nil {
@@ -173,22 +182,23 @@ func (s *SmartShift) GetStatus(ctx context.Context) (SmartShiftStatus, error) {
 
 func validThreshold(value byte) bool { return value >= 1 && value <= 255 }
 func validTorque(value byte) bool    { return value >= 1 && value <= 100 }
+func validSmartShiftMode(mode SmartShiftMode) bool {
+	return mode >= SmartShiftModeSmartShift && mode <= SmartShiftModeRatchet
+}
 
-// SetStatus changes the enabled state and 1..255 threshold while preserving
-// torque on enhanced devices. The mode values are the HID++ values: zero
-// selects speed-dependent switching and one selects free-spin.
-func (s *SmartShift) SetStatus(ctx context.Context, enabled bool, threshold byte) error {
+// SetStatus changes the mechanical mode and 1..255 threshold while preserving
+// torque on enhanced devices.
+func (s *SmartShift) SetStatus(ctx context.Context, mode SmartShiftMode, threshold byte) error {
 	if s == nil {
 		return errors.New("mxmaster: nil smart shift client")
+	}
+	if !validSmartShiftMode(mode) {
+		return fmt.Errorf("mxmaster: smart shift mode %d is unknown", mode)
 	}
 	if !validThreshold(threshold) {
 		return fmt.Errorf("mxmaster: smart shift threshold %d is outside 1..255", threshold)
 	}
-	mode := byte(1)
-	if enabled {
-		mode = 0
-	}
-	params := []byte{mode, threshold}
+	params := []byte{byte(mode), threshold}
 	if s.version == 2 {
 		status, err := s.GetStatus(ctx)
 		if err != nil {
@@ -211,7 +221,7 @@ func (s *SmartShift) SetThreshold(ctx context.Context, threshold byte) error {
 	if err != nil {
 		return err
 	}
-	return s.SetStatus(ctx, status.Enabled, threshold)
+	return s.SetStatus(ctx, status.Mode, threshold)
 }
 
 func (s *SmartShift) GetThreshold(ctx context.Context) (byte, error) {
@@ -247,15 +257,8 @@ func (s *SmartShift) SetTorque(ctx context.Context, torque byte) error {
 	if s.version != 2 || !status.TorqueSupported {
 		return &hidpp.UnsupportedError{Operation: "smart shift torque", Detail: "enhanced torque is not advertised"}
 	}
-	_, err = call(ctx, s.device, s.info, 0x20, statusMode(status), status.Threshold, torque)
+	_, err = call(ctx, s.device, s.info, 0x20, byte(status.Mode), status.Threshold, torque)
 	return err
-}
-
-func statusMode(status SmartShiftStatus) byte {
-	if status.Enabled {
-		return 0
-	}
-	return 1
 }
 
 // WheelMode is the bitfield used by the enhanced wheel. UseHIDPP requests
